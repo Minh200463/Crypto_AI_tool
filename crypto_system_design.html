@@ -1,0 +1,535 @@
+
+<style>
+h2.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.tab-nav{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap}
+.tab-btn{font-size:12px;padding:6px 14px;border-radius:99px;border:0.5px solid var(--color-border-secondary);background:transparent;color:var(--color-text-secondary);cursor:pointer;transition:all .15s}
+.tab-btn.active{background:var(--color-background-info);color:var(--color-text-info);border-color:var(--color-border-info);font-weight:500}
+.tab-panel{display:none}.tab-panel.active{display:block}
+</style>
+
+<h2 class="sr-only">System design và design pattern cho Crypto AI Tool — 4 diagram: tổng quan, data flow, design patterns, cấu trúc thư mục</h2>
+
+<div class="tab-nav">
+  <button class="tab-btn active" onclick="sw('t1',this)">Kiến trúc tổng quan</button>
+  <button class="tab-btn" onclick="sw('t2',this)">Data flow</button>
+  <button class="tab-btn" onclick="sw('t3',this)">Design patterns</button>
+  <button class="tab-btn" onclick="sw('t4',this)">Cấu trúc thư mục</button>
+</div>
+
+<div class="tab-panel active" id="t1">
+<svg width="100%" viewBox="0 0 680 620" role="img">
+<title>Kiến trúc tổng quan hệ thống Crypto AI — 4 tầng từ giao diện đến dữ liệu</title>
+<desc>Sơ đồ 4 tầng: Presentation (Telegram, Web, Mobile), Application Core (FastAPI, services), AI Layer (Claude API), Data Layer (Binance, PostgreSQL, Redis)</desc>
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- Layer 1: Presentation -->
+<rect x="40" y="30" width="600" height="90" rx="12" fill="none" stroke="var(--color-border-secondary)" stroke-width="0.5" stroke-dasharray="5 4"/>
+<text class="ts" x="56" y="50" style="fill:var(--color-text-tertiary);font-weight:500;text-transform:uppercase;letter-spacing:.06em">Tầng 1 — Presentation</text>
+
+<g class="node c-purple" onclick="sendPrompt('Chi tiết về Telegram Bot interface trong hệ thống này')">
+  <rect x="62" y="58" width="140" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="132" y="78" text-anchor="middle" dominant-baseline="central">Telegram Bot</text>
+  <text class="ts" x="132" y="95" text-anchor="middle" dominant-baseline="central">Phase 1 · hiện tại</text>
+</g>
+<g class="node c-purple" onclick="sendPrompt('Chi tiết về Web Dashboard interface')">
+  <rect x="270" y="58" width="140" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="340" y="78" text-anchor="middle" dominant-baseline="central">Web Dashboard</text>
+  <text class="ts" x="340" y="95" text-anchor="middle" dominant-baseline="central">Phase 2 · Next.js</text>
+</g>
+<g class="node c-purple" onclick="sendPrompt('Chi tiết về Mobile App interface')">
+  <rect x="478" y="58" width="140" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="548" y="78" text-anchor="middle" dominant-baseline="central">Mobile App</text>
+  <text class="ts" x="548" y="95" text-anchor="middle" dominant-baseline="central">Phase 3 · React Native</text>
+</g>
+
+<!-- Arrow down -->
+<line x1="340" y1="120" x2="340" y2="148" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+<text class="ts" x="356" y="137" style="fill:var(--color-text-tertiary)">REST / WS</text>
+
+<!-- Layer 2: Application Core -->
+<rect x="40" y="150" width="600" height="160" rx="12" fill="none" stroke="var(--color-border-secondary)" stroke-width="0.5" stroke-dasharray="5 4"/>
+<text class="ts" x="56" y="170" style="fill:var(--color-text-tertiary);font-weight:500;text-transform:uppercase;letter-spacing:.06em">Tầng 2 — Application core (FastAPI · Python)</text>
+
+<g class="node c-teal" onclick="sendPrompt('API Gateway và Auth middleware hoạt động thế nào trong hệ thống này?')">
+  <rect x="62" y="180" width="130" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="127" y="200" text-anchor="middle" dominant-baseline="central">API Gateway</text>
+  <text class="ts" x="127" y="217" text-anchor="middle" dominant-baseline="central">Auth · Rate limit</text>
+</g>
+<g class="node c-teal" onclick="sendPrompt('Alert Engine hoạt động thế nào — trigger, queue, delivery?')">
+  <rect x="210" y="180" width="130" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="275" y="200" text-anchor="middle" dominant-baseline="central">Alert Engine</text>
+  <text class="ts" x="275" y="217" text-anchor="middle" dominant-baseline="central">Trigger · Queue</text>
+</g>
+<g class="node c-teal" onclick="sendPrompt('Technical Analysis Service tính RSI MACD Bollinger thế nào?')">
+  <rect x="358" y="180" width="130" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="423" y="200" text-anchor="middle" dominant-baseline="central">TA Service</text>
+  <text class="ts" x="423" y="217" text-anchor="middle" dominant-baseline="central">RSI · MACD · BB</text>
+</g>
+<g class="node c-teal" onclick="sendPrompt('Scheduler và cron jobs trong hệ thống — cái gì chạy lúc mấy giờ?')">
+  <rect x="506" y="180" width="120" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="566" y="200" text-anchor="middle" dominant-baseline="central">Scheduler</text>
+  <text class="ts" x="566" y="217" text-anchor="middle" dominant-baseline="central">Cron · Tasks</text>
+</g>
+
+<!-- Risk + Portfolio row -->
+<g class="node c-teal" onclick="sendPrompt('Risk Manager service tính position sizing và TP SL thế nào?')">
+  <rect x="62" y="244" width="130" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="127" y="264" text-anchor="middle" dominant-baseline="central">Risk Manager</text>
+  <text class="ts" x="127" y="281" text-anchor="middle" dominant-baseline="central">Position · TP/SL</text>
+</g>
+<g class="node c-teal" onclick="sendPrompt('News Aggregator thu thập và xử lý tin tức crypto thế nào?')">
+  <rect x="210" y="244" width="130" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="275" y="264" text-anchor="middle" dominant-baseline="central">News Aggregator</text>
+  <text class="ts" x="275" y="281" text-anchor="middle" dominant-baseline="central">Crawl · Parse</text>
+</g>
+<g class="node c-teal" onclick="sendPrompt('Portfolio Tracker theo dõi danh mục và tính P&L thế nào?')">
+  <rect x="358" y="244" width="130" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="423" y="264" text-anchor="middle" dominant-baseline="central">Portfolio Tracker</text>
+  <text class="ts" x="423" y="281" text-anchor="middle" dominant-baseline="central">P&amp;L · History</text>
+</g>
+<g class="node c-teal" onclick="sendPrompt('Notification Service gửi alert qua Telegram và các kênh khác thế nào?')">
+  <rect x="506" y="244" width="120" height="48" rx="8" stroke-width="0.5"/>
+  <text class="th" x="566" y="264" text-anchor="middle" dominant-baseline="central">Notification</text>
+  <text class="ts" x="566" y="281" text-anchor="middle" dominant-baseline="central">Push · Delivery</text>
+</g>
+
+<!-- Arrow down -->
+<line x1="340" y1="312" x2="340" y2="338" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+<text class="ts" x="356" y="327" style="fill:var(--color-text-tertiary)">API call</text>
+
+<!-- Layer 3: AI -->
+<rect x="40" y="340" width="600" height="80" rx="12" fill="none" stroke="var(--color-border-secondary)" stroke-width="0.5" stroke-dasharray="5 4"/>
+<text class="ts" x="56" y="360" style="fill:var(--color-text-tertiary);font-weight:500;text-transform:uppercase;letter-spacing:.06em">Tầng 3 — AI layer</text>
+
+<g class="node c-amber" onclick="sendPrompt('Claude API được dùng như thế nào trong hệ thống — prompt templates, function calling?')">
+  <rect x="62" y="368" width="150" height="40" rx="8" stroke-width="0.5"/>
+  <text class="th" x="137" y="384" text-anchor="middle" dominant-baseline="central">Claude API</text>
+  <text class="ts" x="137" y="399" text-anchor="middle" dominant-baseline="central">Haiku · Sonnet</text>
+</g>
+<g class="node c-amber" onclick="sendPrompt('Prompt Template Manager quản lý các prompt cho từng tính năng thế nào?')">
+  <rect x="230" y="368" width="160" height="40" rx="8" stroke-width="0.5"/>
+  <text class="th" x="310" y="384" text-anchor="middle" dominant-baseline="central">Prompt Templates</text>
+  <text class="ts" x="310" y="399" text-anchor="middle" dominant-baseline="central">News · Analysis · Risk</text>
+</g>
+<g class="node c-amber" onclick="sendPrompt('Context Builder chuẩn bị dữ liệu trước khi gửi cho AI thế nào?')">
+  <rect x="408" y="368" width="150" height="40" rx="8" stroke-width="0.5"/>
+  <text class="th" x="483" y="384" text-anchor="middle" dominant-baseline="central">Context Builder</text>
+  <text class="ts" x="483" y="399" text-anchor="middle" dominant-baseline="central">Data → prompt</text>
+</g>
+
+<!-- Arrow down -->
+<line x1="340" y1="422" x2="340" y2="448" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+<text class="ts" x="356" y="437" style="fill:var(--color-text-tertiary)">query / store</text>
+
+<!-- Layer 4: Data -->
+<rect x="40" y="450" width="600" height="80" rx="12" fill="none" stroke="var(--color-border-secondary)" stroke-width="0.5" stroke-dasharray="5 4"/>
+<text class="ts" x="56" y="470" style="fill:var(--color-text-tertiary);font-weight:500;text-transform:uppercase;letter-spacing:.06em">Tầng 4 — Data layer</text>
+
+<g class="node c-gray" onclick="sendPrompt('Binance API được dùng như thế nào — endpoints nào, websocket ra sao?')">
+  <rect x="62" y="478" width="120" height="40" rx="8" stroke-width="0.5"/>
+  <text class="th" x="122" y="494" text-anchor="middle" dominant-baseline="central">Binance API</text>
+  <text class="ts" x="122" y="509" text-anchor="middle" dominant-baseline="central">Price · WS</text>
+</g>
+<g class="node c-gray" onclick="sendPrompt('CryptoPanic API cung cấp dữ liệu tin tức gì cho hệ thống?')">
+  <rect x="200" y="478" width="120" height="40" rx="8" stroke-width="0.5"/>
+  <text class="th" x="260" y="494" text-anchor="middle" dominant-baseline="central">CryptoPanic</text>
+  <text class="ts" x="260" y="509" text-anchor="middle" dominant-baseline="central">News feed</text>
+</g>
+<g class="node c-gray" onclick="sendPrompt('PostgreSQL lưu trữ những gì trong hệ thống này — schema thiết kế thế nào?')">
+  <rect x="338" y="478" width="130" height="40" rx="8" stroke-width="0.5"/>
+  <text class="th" x="403" y="494" text-anchor="middle" dominant-baseline="central">PostgreSQL</text>
+  <text class="ts" x="403" y="509" text-anchor="middle" dominant-baseline="central">Users · Trades · Alerts</text>
+</g>
+<g class="node c-gray" onclick="sendPrompt('Redis được dùng để cache gì và queue gì trong hệ thống?')">
+  <rect x="486" y="478" width="130" height="40" rx="8" stroke-width="0.5"/>
+  <text class="th" x="551" y="494" text-anchor="middle" dominant-baseline="central">Redis</text>
+  <text class="ts" x="551" y="509" text-anchor="middle" dominant-baseline="central">Cache · Alert queue</text>
+</g>
+
+<text class="ts" x="340" y="560" text-anchor="middle" style="fill:var(--color-text-tertiary);font-style:italic">Nhấn vào bất kỳ block để hỏi chi tiết</text>
+</svg>
+</div>
+
+<div class="tab-panel" id="t2">
+<svg width="100%" viewBox="0 0 680 580" role="img">
+<title>Data flow diagram — luồng dữ liệu trong hệ thống Crypto AI</title>
+<desc>Hai luồng chính: luồng Push chủ động chạy nền mỗi 5 phút và luồng Pull theo yêu cầu của user khi gõ lệnh</desc>
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- FLOW 1: Push (background) -->
+<text class="th" x="40" y="38" style="fill:var(--color-text-primary)">Luồng A — Push (chạy nền tự động)</text>
+<text class="ts" x="40" y="56" style="fill:var(--color-text-tertiary)">Scheduler trigger mỗi 5 phút, 30 phút, hoặc 7:00 sáng</text>
+
+<g class="node c-gray" onclick="sendPrompt('Scheduler kích hoạt những job gì và vào lúc nào?')">
+  <rect x="40" y="68" width="110" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="95" y="86" text-anchor="middle" dominant-baseline="central">Scheduler</text>
+  <text class="ts" x="95" y="102" text-anchor="middle" dominant-baseline="central">cron trigger</text>
+</g>
+<line x1="150" y1="90" x2="184" y2="90" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+
+<g class="node c-teal" onclick="sendPrompt('Data Fetcher lấy dữ liệu từ Binance và CryptoPanic thế nào?')">
+  <rect x="186" y="68" width="120" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="246" y="86" text-anchor="middle" dominant-baseline="central">Data Fetcher</text>
+  <text class="ts" x="246" y="102" text-anchor="middle" dominant-baseline="central">Binance · News</text>
+</g>
+<line x1="306" y1="90" x2="340" y2="90" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+
+<g class="node c-gray" onclick="sendPrompt('Redis cache lưu trữ data như thế nào và TTL bao lâu?')">
+  <rect x="342" y="68" width="100" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="392" y="86" text-anchor="middle" dominant-baseline="central">Redis cache</text>
+  <text class="ts" x="392" y="102" text-anchor="middle" dominant-baseline="central">TTL 5 phút</text>
+</g>
+<line x1="442" y1="90" x2="476" y2="90" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+
+<g class="node c-teal" onclick="sendPrompt('Alert Engine so sánh dữ liệu mới với ngưỡng của từng user thế nào?')">
+  <rect x="478" y="68" width="120" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="538" y="86" text-anchor="middle" dominant-baseline="central">Alert Engine</text>
+  <text class="ts" x="538" y="102" text-anchor="middle" dominant-baseline="central">Compare · Trigger</text>
+</g>
+
+<!-- Down from Alert Engine -->
+<line x1="538" y1="112" x2="538" y2="134" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+<text class="ts" x="546" y="125" style="fill:var(--color-text-tertiary)">match</text>
+
+<g class="node c-amber" onclick="sendPrompt('AI Context Builder chuẩn bị data cho Claude khi tạo alert message?')">
+  <rect x="478" y="136" width="120" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="538" y="154" text-anchor="middle" dominant-baseline="central">AI message</text>
+  <text class="ts" x="538" y="170" text-anchor="middle" dominant-baseline="central">Claude Haiku</text>
+</g>
+<line x1="538" y1="180" x2="538" y2="202" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+
+<g class="node c-purple" onclick="sendPrompt('Telegram Sender gửi message đến đúng user thế nào?')">
+  <rect x="478" y="204" width="120" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="538" y="222" text-anchor="middle" dominant-baseline="central">Telegram send</text>
+  <text class="ts" x="538" y="238" text-anchor="middle" dominant-baseline="central">Push to user</text>
+</g>
+
+<!-- Morning report branch -->
+<line x1="246" y1="112" x2="246" y2="134" stroke="var(--color-border-secondary)" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr)" fill="none"/>
+<text class="ts" x="254" y="125" style="fill:var(--color-text-tertiary)">7:00</text>
+
+<g class="node c-amber" onclick="sendPrompt('Morning Report Generator dùng AI tạo bản tin sáng thế nào?')">
+  <rect x="186" y="136" width="120" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="246" y="154" text-anchor="middle" dominant-baseline="central">Morning report</text>
+  <text class="ts" x="246" y="170" text-anchor="middle" dominant-baseline="central">Claude + context</text>
+</g>
+<line x1="306" y1="158" x2="476" y2="222" stroke="var(--color-border-secondary)" stroke-width="0.5" stroke-dasharray="4 3" marker-end="url(#arr)" fill="none"/>
+
+<!-- DIVIDER -->
+<line x1="40" y1="268" x2="640" y2="268" stroke="var(--color-border-tertiary)" stroke-width="0.5" stroke-dasharray="4 4"/>
+
+<!-- FLOW 2: Pull (on-demand) -->
+<text class="th" x="40" y="296" style="fill:var(--color-text-primary)">Luồng B — Pull (theo yêu cầu user)</text>
+<text class="ts" x="40" y="314" style="fill:var(--color-text-tertiary)">User gõ lệnh → hệ thống xử lý → trả kết quả ngay</text>
+
+<g class="node c-purple" onclick="sendPrompt('User input handler parse lệnh Telegram thế nào — /analyze /risk /tp-sl?')">
+  <rect x="40" y="326" width="110" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="95" y="344" text-anchor="middle" dominant-baseline="central">User input</text>
+  <text class="ts" x="95" y="360" text-anchor="middle" dominant-baseline="central">/analyze BTC</text>
+</g>
+<line x1="150" y1="348" x2="184" y2="348" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+
+<g class="node c-teal" onclick="sendPrompt('Command Router phân tích lệnh và route đến đúng service thế nào?')">
+  <rect x="186" y="326" width="110" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="241" y="344" text-anchor="middle" dominant-baseline="central">Command router</text>
+  <text class="ts" x="241" y="360" text-anchor="middle" dominant-baseline="central">Parse · Dispatch</text>
+</g>
+<line x1="296" y1="348" x2="330" y2="348" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+
+<g class="node c-teal" onclick="sendPrompt('TA Service và Risk Service lấy dữ liệu từ cache hay gọi API trực tiếp?')">
+  <rect x="332" y="326" width="110" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="387" y="344" text-anchor="middle" dominant-baseline="central">TA + Risk</text>
+  <text class="ts" x="387" y="360" text-anchor="middle" dominant-baseline="central">Compute</text>
+</g>
+<line x1="442" y1="348" x2="476" y2="348" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+
+<g class="node c-amber" onclick="sendPrompt('Context Builder truyền data kỹ thuật cho Claude để phân tích thế nào?')">
+  <rect x="478" y="326" width="110" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="533" y="344" text-anchor="middle" dominant-baseline="central">AI analysis</text>
+  <text class="ts" x="533" y="360" text-anchor="middle" dominant-baseline="central">Claude Sonnet</text>
+</g>
+
+<line x1="533" y1="370" x2="533" y2="394" stroke="var(--color-border-secondary)" stroke-width="1" marker-end="url(#arr)" fill="none"/>
+
+<g class="node c-gray" onclick="sendPrompt('Response Formatter định dạng output của AI để gửi qua Telegram thế nào?')">
+  <rect x="478" y="396" width="110" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th" x="533" y="414" text-anchor="middle" dominant-baseline="central">Format + send</text>
+  <text class="ts" x="533" y="430" text-anchor="middle" dominant-baseline="central">Telegram reply</text>
+</g>
+
+<!-- Cache hit path -->
+<path d="M387 326 Q387 290 392 290 L442 290" fill="none" stroke="var(--color-text-success)" stroke-width="0.5" stroke-dasharray="4 3" marker-end="url(#arr)" opacity="0.6"/>
+<text class="ts" x="397" y="283" style="fill:var(--color-text-success);opacity:.8">cache hit</text>
+<g class="node c-gray">
+  <rect x="444" y="270" width="90" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="489" y="284" text-anchor="middle" dominant-baseline="central">Redis</text>
+  <text class="ts" x="489" y="299" text-anchor="middle" dominant-baseline="central">skip API</text>
+</g>
+
+<text class="ts" x="340" y="468" text-anchor="middle" style="fill:var(--color-text-tertiary);font-style:italic">Cache hit → bỏ qua API call, tiết kiệm chi phí và tăng tốc độ</text>
+</svg>
+</div>
+
+<div class="tab-panel" id="t3">
+<svg width="100%" viewBox="0 0 680 580" role="img">
+<title>Design patterns áp dụng trong hệ thống Crypto AI</title>
+<desc>5 pattern chính: Repository, Observer, Strategy, Factory, Circuit Breaker — mỗi pattern được giải thích với ví dụ cụ thể trong hệ thống</desc>
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- Pattern 1: Repository -->
+<g class="node c-teal" onclick="sendPrompt('Giải thích Repository Pattern và cách áp dụng cho hệ thống crypto này với code Python mẫu')">
+  <rect x="40" y="30" width="140" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th" x="110" y="52" text-anchor="middle" dominant-baseline="central">Repository</text>
+  <text class="ts" x="110" y="70" text-anchor="middle" dominant-baseline="central">Data access layer</text>
+</g>
+<text class="ts" x="196" y="46" style="fill:var(--color-text-secondary)">Tách biệt logic nghiệp vụ khỏi DB.</text>
+<text class="ts" x="196" y="62" style="fill:var(--color-text-secondary)">UserRepo, AlertRepo, TradeRepo</text>
+<text class="ts" x="196" y="78" style="fill:var(--color-text-tertiary)">Dễ swap PostgreSQL → MongoDB sau này.</text>
+
+<!-- Pattern 2: Observer -->
+<g class="node c-amber" onclick="sendPrompt('Giải thích Observer Pattern trong Alert Engine — code Python mẫu cho price alert và volume alert')">
+  <rect x="40" y="110" width="140" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th" x="110" y="132" text-anchor="middle" dominant-baseline="central">Observer</text>
+  <text class="ts" x="110" y="150" text-anchor="middle" dominant-baseline="central">Event-driven alerts</text>
+</g>
+<text class="ts" x="196" y="126" style="fill:var(--color-text-secondary)">Price stream → PriceObserver kiểm tra</text>
+<text class="ts" x="196" y="142" style="fill:var(--color-text-secondary)">tất cả subscriptions → fire nếu match.</text>
+<text class="ts" x="196" y="158" style="fill:var(--color-text-tertiary)">Thêm loại alert mới không sửa core.</text>
+
+<!-- Pattern 3: Strategy -->
+<g class="node c-purple" onclick="sendPrompt('Giải thích Strategy Pattern cho AI prompts — code Python mẫu với NewsStrategy, AnalysisStrategy, RiskStrategy')">
+  <rect x="40" y="190" width="140" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th" x="110" y="212" text-anchor="middle" dominant-baseline="central">Strategy</text>
+  <text class="ts" x="110" y="230" text-anchor="middle" dominant-baseline="central">AI prompt variants</text>
+</g>
+<text class="ts" x="196" y="206" style="fill:var(--color-text-secondary)">NewsStrategy, AnalysisStrategy,</text>
+<text class="ts" x="196" y="222" style="fill:var(--color-text-secondary)">RiskStrategy — cùng interface.</text>
+<text class="ts" x="196" y="238" style="fill:var(--color-text-tertiary)">Swap prompt template không đụng service.</text>
+
+<!-- Pattern 4: Factory -->
+<g class="node c-coral" onclick="sendPrompt('Giải thích Factory Pattern để tạo Notification objects — Telegram, Email, Web Push với code Python')">
+  <rect x="40" y="270" width="140" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th" x="110" y="292" text-anchor="middle" dominant-baseline="central">Factory</text>
+  <text class="ts" x="110" y="310" text-anchor="middle" dominant-baseline="central">Notification channels</text>
+</g>
+<text class="ts" x="196" y="286" style="fill:var(--color-text-secondary)">NotificationFactory.create("telegram")</text>
+<text class="ts" x="196" y="302" style="fill:var(--color-text-secondary)">→ TelegramNotifier instance.</text>
+<text class="ts" x="196" y="318" style="fill:var(--color-text-tertiary)">Thêm Zalo/Email không sửa caller code.</text>
+
+<!-- Pattern 5: Circuit Breaker -->
+<g class="node c-gray" onclick="sendPrompt('Giải thích Circuit Breaker Pattern cho Binance API và Claude API calls — code Python với tenacity')">
+  <rect x="40" y="350" width="140" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th" x="110" y="372" text-anchor="middle" dominant-baseline="central">Circuit Breaker</text>
+  <text class="ts" x="110" y="390" text-anchor="middle" dominant-baseline="central">API resilience</text>
+</g>
+<text class="ts" x="196" y="366" style="fill:var(--color-text-secondary)">Binance API lỗi 3 lần → open circuit,</text>
+<text class="ts" x="196" y="382" style="fill:var(--color-text-secondary)">dùng cache data, retry sau 60s.</text>
+<text class="ts" x="196" y="398" style="fill:var(--color-text-tertiary)">Hệ thống không crash khi API bên ngoài lỗi.</text>
+
+<!-- Pattern 6: Cache-Aside -->
+<g class="node c-green" onclick="sendPrompt('Giải thích Cache-Aside Pattern cho hệ thống — khi nào read từ cache, khi nào invalidate?')">
+  <rect x="40" y="430" width="140" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th" x="110" y="452" text-anchor="middle" dominant-baseline="central">Cache-Aside</text>
+  <text class="ts" x="110" y="470" text-anchor="middle" dominant-baseline="central">Read-through Redis</text>
+</g>
+<text class="ts" x="196" y="446" style="fill:var(--color-text-secondary)">Request → check Redis → hit: return,</text>
+<text class="ts" x="196" y="462" style="fill:var(--color-text-secondary)">miss: fetch Binance → store → return.</text>
+<text class="ts" x="196" y="478" style="fill:var(--color-text-tertiary)">Giảm 90% API calls, tiết kiệm chi phí.</text>
+
+<text class="ts" x="340" y="528" text-anchor="middle" style="fill:var(--color-text-tertiary);font-style:italic">Nhấn vào pattern để xem code Python mẫu</text>
+</svg>
+</div>
+
+<div class="tab-panel" id="t4">
+<svg width="100%" viewBox="0 0 680 560" role="img">
+<title>Cấu trúc thư mục dự án Crypto AI Tool</title>
+<desc>Monorepo với các thư mục: src/core chứa services, src/ai chứa AI layer, src/data chứa repositories, src/interfaces chứa Telegram và Web adapters</desc>
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- Root -->
+<g class="node c-gray" onclick="sendPrompt('Giải thích cách tổ chức monorepo cho dự án này và lý do chọn cấu trúc này')">
+  <rect x="40" y="30" width="180" height="40" rx="8" stroke-width="0.5"/>
+  <text class="th" x="130" y="50" text-anchor="middle" dominant-baseline="central">crypto-ai-tool/</text>
+</g>
+
+<!-- Main branches from root -->
+<line x1="130" y1="70" x2="130" y2="100" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+
+<!-- Row 1 -->
+<line x1="130" y1="100" x2="640" y2="100" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+
+<line x1="150" y1="100" x2="150" y2="118" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="310" y1="100" x2="310" y2="118" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="470" y1="100" x2="470" y2="118" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="610" y1="100" x2="610" y2="118" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+
+<g class="node c-teal" onclick="sendPrompt('Giải thích nội dung thư mục src/core — các services chính bên trong là gì?')">
+  <rect x="58" y="120" width="184" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="150" y="134" text-anchor="middle" dominant-baseline="central">src/core/</text>
+  <text class="ts" x="150" y="149" text-anchor="middle" dominant-baseline="central">Business logic · Services</text>
+</g>
+<g class="node c-amber" onclick="sendPrompt('Giải thích nội dung thư mục src/ai — prompt templates và AI clients?')">
+  <rect x="222" y="120" width="176" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="310" y="134" text-anchor="middle" dominant-baseline="central">src/ai/</text>
+  <text class="ts" x="310" y="149" text-anchor="middle" dominant-baseline="central">Claude client · Prompts</text>
+</g>
+<g class="node c-purple" onclick="sendPrompt('Giải thích nội dung thư mục src/interfaces — Telegram adapter và Web adapter?')">
+  <rect x="382" y="120" width="176" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="470" y="134" text-anchor="middle" dominant-baseline="central">src/interfaces/</text>
+  <text class="ts" x="470" y="149" text-anchor="middle" dominant-baseline="central">Telegram · Web · Mobile</text>
+</g>
+<g class="node c-gray" onclick="sendPrompt('Giải thích nội dung thư mục src/data — repositories và database models?')">
+  <rect x="542" y="120" width="136" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="610" y="134" text-anchor="middle" dominant-baseline="central">src/data/</text>
+  <text class="ts" x="610" y="149" text-anchor="middle" dominant-baseline="central">Repos · Models</text>
+</g>
+
+<!-- core children -->
+<line x1="150" y1="156" x2="150" y2="178" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="80" y1="178" x2="210" y2="178" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="88" y1="178" x2="88" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="150" y1="178" x2="150" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="212" y1="178" x2="212" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+
+<g class="node c-teal" onclick="sendPrompt('alert_service.py làm gì — code Python mẫu cho Alert Engine?')">
+  <rect x="44" y="198" width="88" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="88" y="214" text-anchor="middle" dominant-baseline="central">alert_</text>
+  <text class="ts" x="88" y="230" text-anchor="middle" dominant-baseline="central">service.py</text>
+</g>
+<g class="node c-teal" onclick="sendPrompt('ta_service.py tính chỉ số kỹ thuật RSI MACD thế nào với pandas-ta?')">
+  <rect x="110" y="198" width="80" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="150" y="214" text-anchor="middle" dominant-baseline="central">ta_</text>
+  <text class="ts" x="150" y="230" text-anchor="middle" dominant-baseline="central">service.py</text>
+</g>
+<g class="node c-teal" onclick="sendPrompt('risk_service.py tính position sizing và TP SL thế nào?')">
+  <rect x="168" y="198" width="88" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="212" y="214" text-anchor="middle" dominant-baseline="central">risk_</text>
+  <text class="ts" x="212" y="230" text-anchor="middle" dominant-baseline="central">service.py</text>
+</g>
+
+<!-- ai children -->
+<line x1="310" y1="156" x2="310" y2="178" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="254" y1="178" x2="364" y2="178" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="262" y1="178" x2="262" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="310" y1="178" x2="310" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="358" y1="178" x2="358" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+
+<g class="node c-amber" onclick="sendPrompt('claude_client.py — wrapper cho Claude API với error handling và retry thế nào?')">
+  <rect x="220" y="198" width="84" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="262" y="214" text-anchor="middle" dominant-baseline="central">claude_</text>
+  <text class="ts" x="262" y="230" text-anchor="middle" dominant-baseline="central">client.py</text>
+</g>
+<g class="node c-amber" onclick="sendPrompt('prompts/ thư mục chứa các file template gì — analysis.txt, news.txt, risk.txt?')">
+  <rect x="280" y="198" width="60" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="310" y="214" text-anchor="middle" dominant-baseline="central">prompts/</text>
+  <text class="ts" x="310" y="230" text-anchor="middle" dominant-baseline="central">templates</text>
+</g>
+<g class="node c-amber" onclick="sendPrompt('context_builder.py xây dựng context data trước khi gửi cho AI thế nào?')">
+  <rect x="316" y="198" width="84" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="358" y="214" text-anchor="middle" dominant-baseline="central">context_</text>
+  <text class="ts" x="358" y="230" text-anchor="middle" dominant-baseline="central">builder.py</text>
+</g>
+
+<!-- interfaces children -->
+<line x1="470" y1="156" x2="470" y2="178" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="412" y1="178" x2="526" y2="178" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="420" y1="178" x2="420" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="470" y1="178" x2="470" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="520" y1="178" x2="520" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+
+<g class="node c-purple" onclick="sendPrompt('telegram/ thư mục — handlers.py và bot.py viết thế nào với python-telegram-bot?')">
+  <rect x="384" y="198" width="72" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="420" y="214" text-anchor="middle" dominant-baseline="central">telegram/</text>
+  <text class="ts" x="420" y="230" text-anchor="middle" dominant-baseline="central">handlers</text>
+</g>
+<g class="node c-purple" onclick="sendPrompt('web/ thư mục — FastAPI routes và WebSocket endpoints cho dashboard?')">
+  <rect x="434" y="198" width="72" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="470" y="214" text-anchor="middle" dominant-baseline="central">web/</text>
+  <text class="ts" x="470" y="230" text-anchor="middle" dominant-baseline="central">API routes</text>
+</g>
+<g class="node c-purple" onclick="sendPrompt('scheduler/ thư mục — cron jobs định nghĩa thế nào với APScheduler?')">
+  <rect x="484" y="198" width="72" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="520" y="214" text-anchor="middle" dominant-baseline="central">scheduler/</text>
+  <text class="ts" x="520" y="230" text-anchor="middle" dominant-baseline="central">cron jobs</text>
+</g>
+
+<!-- data children -->
+<line x1="610" y1="156" x2="610" y2="178" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="564" y1="178" x2="640" y2="178" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="572" y1="178" x2="572" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="634" y1="178" x2="634" y2="196" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+
+<g class="node c-gray" onclick="sendPrompt('repositories/ — UserRepo AlertRepo TradeRepo implement thế nào với SQLAlchemy?')">
+  <rect x="532" y="198" width="80" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="572" y="214" text-anchor="middle" dominant-baseline="central">repos/</text>
+  <text class="ts" x="572" y="230" text-anchor="middle" dominant-baseline="central">SQLAlchemy</text>
+</g>
+<g class="node c-gray" onclick="sendPrompt('models/ — SQLAlchemy models cho User, Alert, Trade, Portfolio trông như thế nào?')">
+  <rect x="594" y="198" width="80" height="44" rx="6" stroke-width="0.5"/>
+  <text class="th" x="634" y="214" text-anchor="middle" dominant-baseline="central">models/</text>
+  <text class="ts" x="634" y="230" text-anchor="middle" dominant-baseline="central">DB schema</text>
+</g>
+
+<!-- Config + Tests row -->
+<line x1="130" y1="70" x2="130" y2="290" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="130" y1="290" x2="530" y2="290" stroke="var(--color-border-secondary)" stroke-width="0.5"/>
+<line x1="180" y1="290" x2="180" y2="308" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="310" y1="290" x2="310" y2="308" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="440" y1="290" x2="440" y2="308" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+<line x1="520" y1="290" x2="520" y2="308" stroke="var(--color-border-secondary)" stroke-width="0.5" marker-end="url(#arr)"/>
+
+<g class="node c-green" onclick="sendPrompt('tests/ thư mục — viết unit test cho services thế nào với pytest?')">
+  <rect x="136" y="310" width="88" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="180" y="324" text-anchor="middle" dominant-baseline="central">tests/</text>
+  <text class="ts" x="180" y="339" text-anchor="middle" dominant-baseline="central">pytest</text>
+</g>
+<g class="node c-gray" onclick="sendPrompt('config/ thư mục — settings.py, .env, secrets management thế nào?')">
+  <rect x="266" y="310" width="88" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="310" y="324" text-anchor="middle" dominant-baseline="central">config/</text>
+  <text class="ts" x="310" y="339" text-anchor="middle" dominant-baseline="central">settings · .env</text>
+</g>
+<g class="node c-gray" onclick="sendPrompt('migrations/ — Alembic database migrations viết thế nào?')">
+  <rect x="396" y="310" width="88" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="440" y="324" text-anchor="middle" dominant-baseline="central">migrations/</text>
+  <text class="ts" x="440" y="339" text-anchor="middle" dominant-baseline="central">Alembic</text>
+</g>
+<g class="node c-gray" onclick="sendPrompt('docker-compose.yml cho development environment trông như thế nào?')">
+  <rect x="476" y="310" width="88" height="36" rx="8" stroke-width="0.5"/>
+  <text class="th" x="520" y="324" text-anchor="middle" dominant-baseline="central">docker/</text>
+  <text class="ts" x="520" y="339" text-anchor="middle" dominant-baseline="central">compose · deploy</text>
+</g>
+
+<!-- Key insight box -->
+<rect x="40" y="380" width="600" height="60" rx="10" fill="none" stroke="var(--color-border-info)" stroke-width="0.5" stroke-dasharray="5 4"/>
+<text class="th" x="340" y="402" text-anchor="middle" dominant-baseline="central">Nguyên tắc thiết kế cốt lõi</text>
+<text class="ts" x="340" y="420" text-anchor="middle" dominant-baseline="central">Interface layer không biết AI layer tồn tại. AI layer không biết DB. Core service không biết</text>
+<text class="ts" x="340" y="436" text-anchor="middle" dominant-baseline="central">dùng Telegram hay Web. Mỗi layer chỉ nói chuyện với layer liền kề qua interface.</text>
+
+<text class="ts" x="340" y="480" text-anchor="middle" style="fill:var(--color-text-tertiary);font-style:italic">Nhấn vào bất kỳ node để xem code mẫu và giải thích chi tiết</text>
+</svg>
+</div>
+
+<script>
+function sw(id,btn){
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  btn.classList.add('active');
+}
+</script>
