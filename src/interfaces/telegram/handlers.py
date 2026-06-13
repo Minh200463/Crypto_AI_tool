@@ -316,22 +316,28 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         binance = _get_binance(context)
         ta_svc = TAService()
 
-        # ── Fetch 4H + 1D + 1W candles (3-layer MTF filter) ──────────
-        candles_4h, candles_1d, candles_1w = await asyncio.gather(
+        # ── Fetch 4H + 1D + 1W candles + OI (P4) ──────────
+        candles_4h, candles_1d, candles_1w, oi_data = await asyncio.gather(
             binance.get_klines(symbol, interval="4h", limit=200),
             binance.get_klines(symbol, interval="1d", limit=200),
             binance.get_klines(symbol, interval="1w", limit=100),  # ~2 years
+            binance.get_open_interest(symbol),
+            return_exceptions=True
         )
 
-        if len(candles_4h) < 50:
+        if isinstance(candles_4h, Exception) or len(candles_4h) < 50:
             await msg.edit_text("❌ Không đủ dữ liệu 4H.")
             return
 
         ind = ta_svc.compute_indicators(_normalize_symbol(symbol), "4h", candles_4h)
+        
+        # Attach OI data to indicator result
+        if oi_data and not isinstance(oi_data, Exception):
+            ind.oi_change_pct = oi_data.get("oi_change_pct")
 
         # ── MTF: 3-layer trend filter (1W → 1D → 4H) ─────────────────
-        daily_trend  = ta_svc.get_daily_trend(candles_1d)  if len(candles_1d)  >= 50 else "sideways"
-        weekly_trend = ta_svc.get_weekly_trend(candles_1w) if len(candles_1w) >= 50 else "sideways"
+        daily_trend  = ta_svc.get_daily_trend(candles_1d)  if not isinstance(candles_1d, Exception) and len(candles_1d)  >= 50 else "sideways"
+        weekly_trend = ta_svc.get_weekly_trend(candles_1w) if not isinstance(candles_1w, Exception) and len(candles_1w) >= 50 else "sideways"
 
         # Weekly trend icon
         weekly_icons = {"uptrend": "📈", "downtrend": "📉", "sideways": "↔️"}
@@ -425,13 +431,23 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         }
         regime_label = regime_labels.get(regime, f"ADX {ind.adx:.1f}")
 
-        # ── Confidence label (replaces raw score display) ─────────────
+        # ── Confidence label + Session filter (P3) ──────────────────────
+        session = ta_svc.get_current_session()
         if score >= 9:
             confidence_label = f"Rất cao ({score}/10)"
         elif score >= 7:
             confidence_label = f"Cao ({score}/10)"
         else:
             confidence_label = f"Trung bình ({score}/10)"
+
+        # Low-liquidity session → downgrade confidence label + add warning
+        session_warning = ""
+        if not session["high_liquidity"]:
+            confidence_label = confidence_label.replace("Rất cao", "Cao").replace("Cao", "Trung bình")
+            session_warning = (
+                f"\n⚠️ {session['emoji']} *{session['label']}* "
+                f"— thanh khoản thấp, tăng nguy cơ fakeout\n"
+            )
 
         # ── Risk reminder block (mandatory for Tier A) ─────────────────
         tier_a_warning = (
@@ -445,7 +461,8 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Lệnh: {emoji} | Chất lượng: {signal_grade}\n"
             f"Độ tin cậy: `{confidence_label}`\n"
             f"📅 1W: {weekly_icon}`{weekly_trend.upper()}` | 1D: `{daily_trend.upper()}`\n"
-            f"📊 Regime: `{regime_label}`\n"
+            f"📊 Regime: `{regime_label}` | Phên: {session['emoji']}`{session['label']}`\n"
+            + session_warning
             + tier_a_warning
             + sizing_block + "\n"
             + entry_block + sl_block + tp_block + "\n"

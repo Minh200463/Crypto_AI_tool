@@ -52,6 +52,10 @@ class IndicatorResult:
     last_candles: list[dict] = field(default_factory=list)  # [{o,h,l,c,v}]
     volume_trend: str = "neutral"  # "rising" | "falling" | "neutral"
 
+    # Open Interest (P4) & Fair Value Gap (P5)
+    oi_change_pct: float | None = None
+    fvg_zones: list[dict] = field(default_factory=list)
+
     @property
     def rsi_label(self) -> str:
         if self.rsi >= 70:
@@ -102,29 +106,82 @@ class IndicatorResult:
 
     @property
     def last_candle_bullish(self) -> bool:
-        """True if the last closed candle is bullish (close > open)."""
-        if not self.last_candles:
+        """
+        True if the last CLOSED candle is bullish (close > open).
+        Uses last_candles[-2] (index N-1, confirmed closed) to avoid
+        lookahead bias from the still-forming candle at last_candles[-1].
+        """
+        if len(self.last_candles) < 2:
             return False
-        c = self.last_candles[-1]
+        c = self.last_candles[-2]  # closed candle, NOT the forming one
         return c["close"] > c["open"]
 
     @property
     def last_candle_bearish(self) -> bool:
-        if not self.last_candles:
+        """
+        True if the last CLOSED candle is bearish. Uses [-2] (see above).
+        """
+        if len(self.last_candles) < 2:
             return False
-        c = self.last_candles[-1]
+        c = self.last_candles[-2]  # closed candle
         return c["close"] < c["open"]
 
     @property
     def candle_body_pct(self) -> float:
-        """Size of last candle body as % of its range. 0-100."""
-        if not self.last_candles:
+        """Size of last CLOSED candle body as % of its range. 0-100."""
+        if len(self.last_candles) < 2:
             return 0.0
-        c = self.last_candles[-1]
+        c = self.last_candles[-2]  # closed candle
         rng = c["high"] - c["low"]
         if rng == 0:
             return 0.0
         return abs(c["close"] - c["open"]) / rng * 100
+
+    @property
+    def pin_bar_signal(self) -> str | None:
+        """
+        Detect Pin Bar (rejection candle) on the last CLOSED candle.
+        Bullish pin bar (hammer): lower_wick > 2x body, upper_wick < 0.5x body
+        Bearish pin bar (shooting star): upper_wick > 2x body, lower_wick < 0.5x body
+        Returns: 'bullish' | 'bearish' | None
+        """
+        if len(self.last_candles) < 2:
+            return None
+        c = self.last_candles[-2]  # closed candle
+        body = abs(c["close"] - c["open"])
+        if body == 0:
+            return None
+        upper_wick = c["high"] - max(c["open"], c["close"])
+        lower_wick = min(c["open"], c["close"]) - c["low"]
+        if lower_wick > 2 * body and upper_wick < body * 0.5:
+            return "bullish"  # hammer / dragonfly doji
+        if upper_wick > 2 * body and lower_wick < body * 0.5:
+            return "bearish"  # shooting star / gravestone doji
+        return None
+
+    @property
+    def engulfing_signal(self) -> str | None:
+        """
+        Detect Engulfing pattern using last 2 CLOSED candles [-2] and [-3].
+        Bullish engulfing: curr body > prev body, curr bullish, prev bearish.
+        Bearish engulfing: curr body > prev body, curr bearish, prev bullish.
+        Returns: 'bullish' | 'bearish' | None
+        """
+        if len(self.last_candles) < 3:
+            return None
+        prev = self.last_candles[-3]  # 2 candles ago (closed)
+        curr = self.last_candles[-2]  # last closed candle
+        prev_body = abs(prev["close"] - prev["open"])
+        curr_body = abs(curr["close"] - curr["open"])
+        if curr_body == 0:
+            return None
+        curr_bull = curr["close"] > curr["open"]
+        prev_bull = prev["close"] > prev["open"]
+        if curr_body > prev_body and curr_bull and not prev_bull:
+            return "bullish"
+        if curr_body > prev_body and not curr_bull and prev_bull:
+            return "bearish"
+        return None
 
     @property
     def market_regime(self) -> str:
@@ -213,8 +270,10 @@ class TAService:
         bb_lower = float(bb.bollinger_lband().iloc[-1])
 
         # ── Moving Averages ───────────────────────────────────────────────
-        ma20 = float(ta.trend.SMAIndicator(close=close, window=20).sma_indicator().iloc[-1])
-        ma50 = float(ta.trend.SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
+        # EMA20/50: faster reaction to recent price action (P6 — SMA→EMA migration)
+        # MA200 stays SMA: used for long-term trend baseline, not entry timing
+        ma20 = float(ta.trend.EMAIndicator(close=close, window=20).ema_indicator().iloc[-1])
+        ma50 = float(ta.trend.EMAIndicator(close=close, window=50).ema_indicator().iloc[-1])
         ma200 = float(ta.trend.SMAIndicator(close=close, window=200).sma_indicator().iloc[-1])
 
         # ── ATR ───────────────────────────────────────────────────────────
@@ -283,6 +342,7 @@ class TAService:
             resistance_levels=resistance_levels,
             last_candles=last_candles,
             volume_trend=vol_trend,
+            fvg_zones=self._detect_fvg(df),
         )
 
     def _detect_swing_levels(
@@ -310,6 +370,29 @@ class TAService:
         )[:5]
 
         return support, resistance
+
+    def _detect_fvg(self, df: pd.DataFrame, lookback: int = 20) -> list[dict]:
+        """
+        Detect Fair Value Gaps in last N candles.
+        Returns list of {"type": "bullish"|"bearish", "top": float, "bottom": float}
+        """
+        fvgs = []
+        for i in range(1, min(lookback, len(df) - 1)):
+            idx = -(i + 1)  # start from candle[-2] backwards
+            c_prev = df.iloc[idx - 1]
+            c_curr = df.iloc[idx]
+            c_next = df.iloc[idx + 1]
+            
+            body_size = abs(c_curr["close"] - c_curr["open"])
+            avg_body = df["close"].std() * 0.5  # Rough proxy for strong impulse
+            
+            # Bullish FVG
+            if c_prev["high"] < c_next["low"] and body_size > avg_body:
+                fvgs.append({"type": "bullish", "top": float(c_next["low"]), "bottom": float(c_prev["high"])})
+            # Bearish FVG
+            if c_prev["low"] > c_next["high"] and body_size > avg_body:
+                fvgs.append({"type": "bearish", "top": float(c_prev["low"]), "bottom": float(c_next["high"])})
+        return fvgs[:3]  # top 3 most recent FVGs
 
     # ── MTF Trend Filter ─────────────────────────────────────────────────────
 
@@ -354,6 +437,33 @@ class TAService:
           - SIDEWAYS:  neutral, no macro filter applied
         """
         return self._trend_from_candles(raw_candles_1w)
+
+    @staticmethod
+    def get_current_session() -> dict:
+        """
+        Classify current UTC time into Forex/Crypto trading sessions.
+
+        Sessions (UTC):
+          london   07:00–13:00  — High liquidity, institutional activity
+          overlap  13:00–17:00  — London + NY overlap (STRONGEST, most volume)
+          ny_close 17:00–21:00  — NY afternoon, fading liquidity
+          asia     01:00–07:00  — Low liquidity, fakeouts more common
+          off      21:00–01:00  — Dead zone, minimal volume
+
+        Returns dict: {name, label, emoji, high_liquidity}
+        """
+        from datetime import datetime, timezone
+        utc_hour = datetime.now(timezone.utc).hour
+
+        if 13 <= utc_hour < 17:
+            return {"name": "overlap",   "label": "London+NY Overlap", "emoji": "🟢", "high_liquidity": True}
+        if 7  <= utc_hour < 13:
+            return {"name": "london",    "label": "London Session",     "emoji": "🟢", "high_liquidity": True}
+        if 17 <= utc_hour < 21:
+            return {"name": "ny_close",  "label": "NY Close",           "emoji": "🟡", "high_liquidity": True}
+        if 1  <= utc_hour < 7:
+            return {"name": "asia",      "label": "Asia Session",       "emoji": "🔴", "high_liquidity": False}
+        return     {"name": "off",       "label": "Off-Hours",          "emoji": "⚫", "high_liquidity": False}
 
     # ── Scoring (v2 — 10-point weighted system) ──────────────────────────────
 
@@ -418,21 +528,40 @@ class TAService:
             score += 1
             reasons.append("Price below Bollinger midband")
 
-        # ── 4. Candle Confirmation (0–2 pts) — NEW ────────────────────────
-        if ind.last_candle_bullish and ind.candle_body_pct >= 50:
+        # ── 4. Candle Confirmation (0–2 pts) ────────────────────────────
+        # Priority: Pin Bar > Engulfing > Strong body > Weak body
+        # All checks use last_candles[-2] (closed candle — no lookahead bias)
+        _pin = ind.pin_bar_signal
+        _eng = ind.engulfing_signal
+        if _pin == "bullish":
             score += 2
-            reasons.append(f"Strong bullish candle confirmation ({ind.candle_body_pct:.0f}% body)")
-        elif ind.last_candle_bullish:
+            reasons.append("🔨 Bullish Pin Bar (hammer/rejection) — strong reversal signal")
+        elif _eng == "bullish":
+            score += 2
+            reasons.append("📈 Bullish Engulfing candle — momentum shift confirmed")
+        elif ind.last_candle_bullish and ind.candle_body_pct >= 50:
             score += 1
-            reasons.append("Bullish candle (small body)")
+            reasons.append(f"Bullish candle, strong body ({ind.candle_body_pct:.0f}%)")
+        elif ind.last_candle_bullish:
+            score += 0  # weak body, no signal
+            reasons.append(f"Bullish candle, weak body ({ind.candle_body_pct:.0f}%) — no points")
+        elif _pin == "bearish" or _eng == "bearish":
+            reasons.append("⚠️ Bearish candle pattern — contradicts LONG setup")
 
-        # ── 5. Swing Level Proximity (0–1 pt) — NEW ──────────────────────
+        # ── 5. Swing Level & FVG Proximity (0–2 pts) ─────────────────────────
         ns = ind.nearest_support
         if ns and abs(ind.current_price - ns) / ind.current_price < 0.015:
             score += 1
             reasons.append(f"Price near key support (${ns:,.0f}, within 1.5%)")
+            
+        # P5: Check if current price is inside a bullish FVG
+        for fvg in ind.fvg_zones:
+            if fvg["type"] == "bullish" and fvg["bottom"] <= ind.current_price <= fvg["top"]:
+                score += 1
+                reasons.append(f"Price inside Bullish FVG zone (${fvg['bottom']:,.0f} - ${fvg['top']:,.0f}) 🎯")
+                break
 
-        # ── 6. Volume Trend (0–2 pts) — direction-aware ──────────────────
+        # ── 6. Volume Trend & Open Interest (0–3 pts) ────────────────────────
         # Volume only counts if the candle is BULLISH (confirming buy pressure)
         if ind.volume_trend == "rising" and ind.volume_vs_avg > 1.5 and ind.last_candle_bullish:
             score += 2
@@ -442,6 +571,15 @@ class TAService:
             reasons.append(f"Bullish rising volume ({ind.volume_vs_avg:.1f}x avg)")
         elif ind.volume_trend == "rising" and not ind.last_candle_bullish:
             reasons.append(f"⚠️ Volume spike on bearish candle — sell pressure, not counted for LONG")
+
+        # P4: Open Interest confirmation
+        if ind.oi_change_pct is not None:
+            if ind.oi_change_pct > 2.0 and ind.last_candle_bullish:
+                score += 1
+                reasons.append(f"OI Rising (+{ind.oi_change_pct:.1f}%) + Price Rising = Strong New Longs 🟢")
+            elif ind.oi_change_pct < -2.0 and ind.last_candle_bullish:
+                reasons.append(f"OI Falling ({ind.oi_change_pct:.1f}%) + Price Rising = Short Covering (Weak Buy)")
+
 
         # ── 7. Daily + Weekly alignment bonus (0–1 pt) ──────────────────
         # Full +1 only when weekly trend ALSO confirms the direction.
@@ -542,21 +680,39 @@ class TAService:
             score += 1
             reasons.append("Price above Bollinger midband")
 
-        # ── 4. Candle Confirmation (0–2 pts) — NEW ────────────────────────
-        if ind.last_candle_bearish and ind.candle_body_pct >= 50:
+        # ── 4. Candle Confirmation (0–2 pts) ────────────────────────────
+        # Priority: Pin Bar > Engulfing > Strong body > Weak body
+        _pin = ind.pin_bar_signal
+        _eng = ind.engulfing_signal
+        if _pin == "bearish":
             score += 2
-            reasons.append(f"Strong bearish candle confirmation ({ind.candle_body_pct:.0f}% body)")
-        elif ind.last_candle_bearish:
+            reasons.append("🌠 Bearish Pin Bar (shooting star/rejection) — strong reversal signal")
+        elif _eng == "bearish":
+            score += 2
+            reasons.append("📉 Bearish Engulfing candle — momentum shift confirmed")
+        elif ind.last_candle_bearish and ind.candle_body_pct >= 50:
             score += 1
-            reasons.append("Bearish candle (small body)")
+            reasons.append(f"Bearish candle, strong body ({ind.candle_body_pct:.0f}%)")
+        elif ind.last_candle_bearish:
+            score += 0
+            reasons.append(f"Bearish candle, weak body ({ind.candle_body_pct:.0f}%) — no points")
+        elif _pin == "bullish" or _eng == "bullish":
+            reasons.append("⚠️ Bullish candle pattern — contradicts SHORT setup")
 
-        # ── 5. Swing Level Proximity (0–1 pt) — NEW ──────────────────────
+        # ── 5. Swing Level & FVG Proximity (0–2 pts) ─────────────────────────
         nr = ind.nearest_resistance
         if nr and abs(nr - ind.current_price) / ind.current_price < 0.015:
             score += 1
             reasons.append(f"Price near key resistance (${nr:,.0f}, within 1.5%)")
 
-        # ── 6. Volume Trend (0–2 pts) — direction-aware ──────────────────
+        # P5: Check if current price is inside a bearish FVG
+        for fvg in ind.fvg_zones:
+            if fvg["type"] == "bearish" and fvg["bottom"] <= ind.current_price <= fvg["top"]:
+                score += 1
+                reasons.append(f"Price inside Bearish FVG zone (${fvg['bottom']:,.0f} - ${fvg['top']:,.0f}) 🎯")
+                break
+
+        # ── 6. Volume Trend & Open Interest (0–3 pts) ────────────────────────
         # Volume only counts if the candle is BEARISH (confirming sell pressure)
         if ind.volume_trend == "rising" and ind.volume_vs_avg > 1.5 and ind.last_candle_bearish:
             score += 2
@@ -566,6 +722,15 @@ class TAService:
             reasons.append(f"Bearish rising volume ({ind.volume_vs_avg:.1f}x avg)")
         elif ind.volume_trend == "rising" and not ind.last_candle_bearish:
             reasons.append(f"⚠️ Volume spike on bullish candle — buy pressure, not counted for SHORT")
+
+        # P4: Open Interest confirmation
+        if ind.oi_change_pct is not None:
+            if ind.oi_change_pct > 2.0 and ind.last_candle_bearish:
+                score += 1
+                reasons.append(f"OI Rising (+{ind.oi_change_pct:.1f}%) + Price Falling = Strong New Shorts 🔴")
+            elif ind.oi_change_pct < -2.0 and ind.last_candle_bearish:
+                reasons.append(f"OI Falling ({ind.oi_change_pct:.1f}%) + Price Falling = Long Liquidation (Weak Sell)")
+
 
         # ── 7. Daily + Weekly alignment bonus (0–1 pt) ──────────────────
         # Full +1 only when weekly trend ALSO confirms the bearish direction.

@@ -166,6 +166,41 @@ class BinanceClient:
 
         return data
 
+    async def get_open_interest(self, symbol: str) -> dict | None:
+        """
+        Get current + historical Open Interest from Futures API for trend confirmation.
+        Returns: {"oi": current_oi, "oi_change_pct": %_change_vs_4h_ago}
+        Returns None if symbol is spot-only or API fails.
+        """
+        symbol = _normalize_symbol(symbol)
+        cache_key = f"oi:{symbol}"
+        if self._cache:
+            cached = await self._cache.get(cache_key)
+            if cached:
+                return cached
+
+        try:
+            # Only works for futures symbols. 
+            current = await self._get("/fapi/v1/openInterest", {"symbol": symbol}, use_futures=True)
+            hist = await self._get(
+                "/futures/data/openInterestHist",
+                {"symbol": symbol, "period": "4h", "limit": 2},
+                use_futures=True
+            )
+            oi_now = float(current["openInterest"])
+            oi_prev = float(hist[0]["sumOpenInterest"]) if hist else oi_now
+            
+            result = {
+                "oi": oi_now,
+                "oi_change_pct": ((oi_now - oi_prev) / oi_prev * 100) if oi_prev else 0.0,
+            }
+            if self._cache:
+                await self._cache.set(cache_key, result, ttl_seconds=300)
+            return result
+        except Exception as e:
+            logger.debug("OI unavailable for %s: %s", symbol, e)
+            return None
+
     async def get_funding_rate(self, symbol: str) -> float | None:
         """
         Get current futures funding rate.
