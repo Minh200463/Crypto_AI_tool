@@ -46,7 +46,10 @@ class BinanceClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=5),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        # Only retry genuine network errors (timeout, DNS, connection reset).
+        # Do NOT retry HTTPStatusError — 400/404 are intentional server responses
+        # and are used by the Spot→Futures fallback logic in callers.
+        retry=retry_if_exception_type(httpx.RequestError),
         reraise=True,
     )
     async def _get(self, path: str, params: dict | None = None, use_futures: bool = False) -> Any:
@@ -54,6 +57,23 @@ class BinanceClient:
         resp = await self._http.get(url, params=params)
         resp.raise_for_status()
         return resp.json()
+
+    async def _get_market_type(self, symbol: str) -> str:
+        """
+        Returns cached market type for symbol: 'spot' | 'futures'.
+        Avoids unnecessary Spot API call on repeated requests for Futures-only symbols.
+        TTL: 24 hours (market listings rarely change intraday).
+        """
+        if self._cache:
+            cached = await self._cache.get(f"mtype:{symbol}")
+            if cached:
+                return cached
+        return "spot"  # default: try Spot first
+
+    async def _cache_market_type(self, symbol: str, market_type: str) -> None:
+        """Cache market type discovery result for 24 hours."""
+        if self._cache:
+            await self._cache.set(f"mtype:{symbol}", market_type, ttl_seconds=86400)
 
     async def get_ticker(self, symbol: str) -> dict:
         """
@@ -71,12 +91,17 @@ class BinanceClient:
                 return cached
 
         logger.debug("Fetching ticker from Binance: %s", symbol)
+        # Skip Spot call if we already know this symbol is Futures-only
+        use_futures_direct = (await self._get_market_type(symbol)) == "futures"
         try:
+            if use_futures_direct:
+                raise httpx.HTTPStatusError("skip spot", request=None, response=None)  # type: ignore
             data = await self._get("/api/v3/ticker/24hr", {"symbol": symbol})
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 400:
-                logger.debug(f"Spot ticker failed for {symbol}, trying Futures API")
+            if use_futures_direct or e.response is None or e.response.status_code == 400:
+                logger.info("Symbol %s is Futures-only — fetching ticker from fapi", symbol)
                 data = await self._get("/fapi/v1/ticker/24hr", {"symbol": symbol}, use_futures=True)
+                await self._cache_market_type(symbol, "futures")
             else:
                 raise
 
@@ -115,19 +140,24 @@ class BinanceClient:
             if cached:
                 return cached
 
+        # Skip Spot call if we already know this symbol is Futures-only
+        use_futures_direct = (await self._get_market_type(symbol)) == "futures"
         try:
+            if use_futures_direct:
+                raise httpx.HTTPStatusError("skip spot", request=None, response=None)  # type: ignore
             data = await self._get(
                 "/api/v3/klines",
                 {"symbol": symbol, "interval": interval, "limit": limit},
             )
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 400:
-                logger.debug(f"Spot klines failed for {symbol}, trying Futures API")
+            if use_futures_direct or e.response is None or e.response.status_code == 400:
+                logger.info("Symbol %s is Futures-only — fetching klines from fapi (%s, limit=%s)", symbol, interval, limit)
                 data = await self._get(
                     "/fapi/v1/klines",
                     {"symbol": symbol, "interval": interval, "limit": limit},
                     use_futures=True
                 )
+                await self._cache_market_type(symbol, "futures")
             else:
                 raise
 
