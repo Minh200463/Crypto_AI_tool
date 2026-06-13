@@ -29,27 +29,58 @@ def setup_bot(cache, db_session_factory) -> Application | None:
 
     # ── Register all command handlers ─────────────────────────────────────
     commands = [
-        ("start",       handlers.start_handler),
-        ("help",        handlers.help_handler),
+        ("start",          handlers.start_handler),
+        ("help",           handlers.help_handler),
         # Price & Market
-        ("price",       handlers.price_handler),
-        ("market",      handlers.market_handler),
+        ("price",          handlers.price_handler),
+        ("market",         handlers.market_handler),
         # Watchlist
-        ("watchlist",   handlers.watchlist_handler),
-        ("watch",       handlers.watch_handler),
-        ("unwatch",     handlers.unwatch_handler),
+        ("watchlist",      handlers.watchlist_handler),
+        ("watch",          handlers.watch_handler),
+        ("unwatch",        handlers.unwatch_handler),
         # Analysis & Signals
-        ("analyze",     handlers.analyze_handler),
-        ("signal",      handlers.signal_handler),
+        ("analyze",        handlers.analyze_handler),
+        ("signal",         handlers.signal_handler),
         # Alerts
-        ("setalert",    handlers.setalert_handler),
-        ("alerts",      handlers.alerts_handler),
-        ("clear",       handlers.clear_handler),
-        ("clearall",    handlers.clearall_handler),
+        ("setalert",       handlers.setalert_handler),
+        ("alerts",         handlers.alerts_handler),
+        ("clear",          handlers.clear_handler),
+        ("clearall",       handlers.clearall_handler),
+        # Backtesting & Stats
+        ("stats",          handlers.stats_handler),
+        ("history",        handlers.history_handler),
+        ("checkoutcomes",  handlers.checkoutcomes_handler),
+        # Position Sizing
+        ("setequity",      handlers.setequity_handler),
+        ("setrisk",        handlers.setrisk_handler),
+        ("possize",        handlers.possize_handler),
     ]
 
     for cmd, handler in commands:
         app.add_handler(CommandHandler(cmd, handler))
 
+    # ── 4H auto-check open signal outcomes ────────────────────────────────
+    _register_outcome_checker(app)
+
     logger.info("Telegram bot ready — %d commands registered.", len(commands))
     return app
+
+
+def _register_outcome_checker(app: Application) -> None:
+    """Register a periodic job (every 4H) to auto-check open signal outcomes."""
+    try:
+        from src.core.signal_tracker import check_open_signals
+
+        async def _auto_check(context):
+            binance = context.bot_data.get("binance")
+            if not binance:
+                return
+            resolved = await check_open_signals(binance)
+            if resolved:
+                logger.info("Auto-check: %d signals resolved", len(resolved))
+
+        # Run every 4 hours (14400 seconds), first run after 60s
+        app.job_queue.run_repeating(_auto_check, interval=14400, first=60)
+        logger.info("4H outcome checker job registered.")
+    except Exception as e:
+        logger.warning("Could not register outcome checker job: %s", e)

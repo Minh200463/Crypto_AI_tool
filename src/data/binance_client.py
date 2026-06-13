@@ -1,0 +1,189 @@
+"""
+Binance API Client — fetches market data (no API key needed for public endpoints).
+Uses httpx async + tenacity retry + cache-aside pattern.
+"""
+import logging
+from typing import Any
+import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+logger = logging.getLogger(__name__)
+
+BINANCE_BASE_URL = "https://api.binance.com"
+BINANCE_TESTNET_URL = "https://testnet.binance.vision"
+BINANCE_FUTURES_URL = "https://fapi.binance.com"
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """Convert 'BTC' or 'btc' to 'BTCUSDT', pass through 'BTCUSDT'."""
+    symbol = symbol.upper().strip()
+    if not symbol.endswith("USDT"):
+        symbol = f"{symbol}USDT"
+    return symbol
+
+
+class BinanceClient:
+    """
+    Async Binance REST API client.
+    All public market data endpoints — no API key required.
+    """
+
+    def __init__(self, cache=None, testnet: bool = False) -> None:
+        # Market data (klines, ticker, funding) always uses mainnet — no API key needed.
+        # Testnet only applies to trading order endpoints (Phase 4+).
+        self._base_url = BINANCE_BASE_URL
+        self._testnet = testnet  # reserved for future order endpoints
+        self._cache = cache
+        self._http = httpx.AsyncClient(
+            base_url=self._base_url,
+            timeout=10.0,
+            headers={"User-Agent": "CryptoAI-Tool/1.0"},
+        )
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        reraise=True,
+    )
+    async def _get(self, path: str, params: dict | None = None, use_futures: bool = False) -> Any:
+        url = f"{BINANCE_FUTURES_URL}{path}" if use_futures else path
+        resp = await self._http.get(url, params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_ticker(self, symbol: str) -> dict:
+        """
+        Get current price and 24h stats for a coin.
+        Returns: {symbol, price, change_pct, volume, high_24h, low_24h}
+        Cached 30 seconds.
+        """
+        symbol = _normalize_symbol(symbol)
+        cache_key = f"ticker:{symbol}"
+
+        if self._cache:
+            cached = await self._cache.get(cache_key)
+            if cached:
+                logger.debug("Cache hit: %s", cache_key)
+                return cached
+
+        logger.debug("Fetching ticker from Binance: %s", symbol)
+        try:
+            data = await self._get("/api/v3/ticker/24hr", {"symbol": symbol})
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                logger.debug(f"Spot ticker failed for {symbol}, trying Futures API")
+                data = await self._get("/fapi/v1/ticker/24hr", {"symbol": symbol}, use_futures=True)
+            else:
+                raise
+
+        result = {
+            "symbol": symbol,
+            "price": float(data["lastPrice"]),
+            "change_pct": float(data["priceChangePercent"]),
+            "volume_usdt": float(data["quoteVolume"]),
+            "high_24h": float(data["highPrice"]),
+            "low_24h": float(data["lowPrice"]),
+            "price_change": float(data["priceChange"]),
+        }
+
+        if self._cache:
+            await self._cache.set(cache_key, result, ttl_seconds=30)
+
+        return result
+
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str = "4h",
+        limit: int = 200,
+    ) -> list[list]:
+        """
+        Get OHLCV candlestick data.
+        interval: 1m, 5m, 15m, 1h, 4h, 1d
+        Returns list of [open_time, open, high, low, close, volume, ...]
+        Cached 5 minutes.
+        """
+        symbol = _normalize_symbol(symbol)
+        cache_key = f"klines:{symbol}:{interval}:{limit}"
+
+        if self._cache:
+            cached = await self._cache.get(cache_key)
+            if cached:
+                return cached
+
+        try:
+            data = await self._get(
+                "/api/v3/klines",
+                {"symbol": symbol, "interval": interval, "limit": limit},
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                logger.debug(f"Spot klines failed for {symbol}, trying Futures API")
+                data = await self._get(
+                    "/fapi/v1/klines",
+                    {"symbol": symbol, "interval": interval, "limit": limit},
+                    use_futures=True
+                )
+            else:
+                raise
+
+        if self._cache:
+            await self._cache.set(cache_key, data, ttl_seconds=300)
+
+        return data
+
+    async def get_funding_rate(self, symbol: str) -> float | None:
+        """
+        Get current futures funding rate.
+        Returns funding rate as float (e.g. 0.0001 = 0.01%).
+        Returns None if symbol not available on futures.
+        """
+        symbol = _normalize_symbol(symbol)
+        cache_key = f"funding:{symbol}"
+
+        if self._cache:
+            cached = await self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        try:
+            data = await self._get("/fapi/v1/premiumIndex", {"symbol": symbol}, use_futures=True)
+            rate = float(data.get("lastFundingRate", 0))
+            if self._cache:
+                await self._cache.set(cache_key, rate, ttl_seconds=300)
+            return rate
+        except Exception as e:
+            logger.warning("Funding rate unavailable for %s: %s", symbol, e)
+            return None
+
+    async def get_fear_greed_index(self) -> dict:
+        """
+        Get Fear & Greed Index from Alternative.me (no API key needed).
+        Returns: {value: int, label: str}
+        Cached 1 hour.
+        """
+        cache_key = "fear_greed"
+
+        if self._cache:
+            cached = await self._cache.get(cache_key)
+            if cached:
+                return cached
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get("https://api.alternative.me/fng/?limit=1")
+            resp.raise_for_status()
+            data = resp.json()["data"][0]
+
+        result = {
+            "value": int(data["value"]),
+            "label": data["value_classification"],
+        }
+
+        if self._cache:
+            await self._cache.set(cache_key, result, ttl_seconds=3600)
+
+        return result

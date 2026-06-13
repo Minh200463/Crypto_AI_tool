@@ -5,6 +5,7 @@ Improvements:
   2. Weighted confluence scoring (10-point scale, threshold 6)
   3. Entry Zone (limit vs market entry)
   4. Candle confirmation, volume trend, swing proximity checks
+  5. ADX Market Regime Filter (trending vs ranging)
 """
 import logging
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ class IndicatorResult:
     bb_mid: float
     bb_lower: float
     atr: float
+    adx: float = 0.0  # ADX(14) — trend strength indicator
 
     # Swing levels
     support_levels: list[float] = field(default_factory=list)
@@ -123,6 +125,20 @@ class IndicatorResult:
         if rng == 0:
             return 0.0
         return abs(c["close"] - c["open"]) / rng * 100
+
+    @property
+    def market_regime(self) -> str:
+        """
+        Market regime based on ADX(14):
+          'trending'     — ADX > 25: strong directional move, use trend indicators
+          'ranging'      — ADX < 20: consolidation, use mean-reversion indicators
+          'transitional' — ADX 20-25: ambiguous, apply standard scoring
+        """
+        if self.adx > 25:
+            return "trending"
+        if self.adx < 20:
+            return "ranging"
+        return "transitional"
 
 
 def _parse_candles(raw_candles: list[list]) -> pd.DataFrame:
@@ -208,6 +224,14 @@ class TAService:
             ).average_true_range().iloc[-1]
         )
 
+        # ── ADX (trend strength) ──────────────────────────────────────────
+        # ADX > 25 = trending, < 20 = ranging, 20-25 = transitional
+        try:
+            adx_ind = ta.trend.ADXIndicator(high=high, low=low, close=close, window=14)
+            adx_val = float(adx_ind.adx().iloc[-1])
+        except Exception:
+            adx_val = 0.0  # fallback if insufficient data
+
         # ── Volume ───────────────────────────────────────────────────────
         avg_vol_20 = float(volume.iloc[-20:].mean())
         current_vol = float(volume.iloc[-1])
@@ -254,6 +278,7 @@ class TAService:
             bb_mid=bb_mid,
             bb_lower=bb_lower,
             atr=atr,
+            adx=adx_val,
             support_levels=support_levels,
             resistance_levels=resistance_levels,
             last_candles=last_candles,
@@ -288,15 +313,19 @@ class TAService:
 
     # ── MTF Trend Filter ─────────────────────────────────────────────────────
 
-    def get_daily_trend(self, raw_candles_1d: list[list]) -> str:
+    @staticmethod
+    def _trend_from_candles(raw_candles: list[list]) -> str:
         """
-        Returns daily trend label: 'uptrend' | 'downtrend' | 'sideways'.
-        Used as MTF filter to avoid trading against the macro trend.
+        Shared MA-based trend computation for any timeframe.
+        Returns: 'uptrend' | 'downtrend' | 'sideways'
+        Requires at least 50 candles; returns 'sideways' otherwise.
         """
         import ta
-        df = _parse_candles(raw_candles_1d)
+        if len(raw_candles) < 50:
+            return "sideways"
+        df = _parse_candles(raw_candles)
         close = df["close"]
-        ma50 = float(ta.trend.SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
+        ma50  = float(ta.trend.SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
         ma200 = float(ta.trend.SMAIndicator(close=close, window=200).sma_indicator().iloc[-1])
         current = float(close.iloc[-1])
         if current > ma50 > ma200:
@@ -305,24 +334,62 @@ class TAService:
             return "downtrend"
         return "sideways"
 
+    def get_daily_trend(self, raw_candles_1d: list[list]) -> str:
+        """
+        Returns daily trend label: 'uptrend' | 'downtrend' | 'sideways'.
+        Used as intermediate MTF filter (Layer 2).
+        Needs >= 50 daily candles (~2 months).
+        """
+        return self._trend_from_candles(raw_candles_1d)
+
+    def get_weekly_trend(self, raw_candles_1w: list[list]) -> str:
+        """
+        Returns weekly trend label: 'uptrend' | 'downtrend' | 'sideways'.
+        Used as macro MTF filter (Layer 3 — strongest filter).
+        Needs >= 50 weekly candles (~1 year). Binance returns 200 by default.
+
+        Weekly trend represents the primary market structure:
+          - DOWNTREND: bear market, rising counters are risky for LONG
+          - UPTREND:   bull market, dips are risky for SHORT
+          - SIDEWAYS:  neutral, no macro filter applied
+        """
+        return self._trend_from_candles(raw_candles_1w)
+
     # ── Scoring (v2 — 10-point weighted system) ──────────────────────────────
 
     def score_long_setup(
         self,
         ind: IndicatorResult,
         daily_trend: str = "sideways",
+        weekly_trend: str = "sideways",
     ) -> tuple[int, list[str]]:
         """
         Confluence scoring for LONG signal.
         Scale: 0–10. Threshold: 6 to fire signal.
-        daily_trend: 'uptrend' | 'downtrend' | 'sideways' (from 1D candles)
+
+        3-Layer MTF Filter:
+          L1 — 4H indicators    (score base)
+          L2 — Daily trend      (block if DOWNTREND)
+          L3 — Weekly trend     (hard block if weekly+daily both DOWNTREND;
+                                  soft warning + withhold daily bonus if weekly DOWNTREND alone)
         """
         score = 0
         reasons: list[str] = []
 
-        # ── [FILTER] Block counter-trend signals ─────────────────────────
+        # ── [L2] Block if daily is bearish ───────────────────────────────
         if daily_trend == "downtrend":
             return 0, ["❌ Blocked: Daily trend is DOWNTREND — no long signals"]
+
+        # ── [L3] Weekly macro trend check ────────────────────────────────
+        # Hard block: weekly AND daily both bearish — deep bear market, no LONG
+        if weekly_trend == "downtrend" and daily_trend == "downtrend":
+            return 0, ["❌ Blocked: Weekly + Daily DOWNTREND — macro bear market"]
+        # Soft warning: weekly bearish but daily is a counter-trend relief rally
+        weekly_counter = (weekly_trend == "downtrend")
+        if weekly_counter:
+            reasons.append(
+                "⚠️ Weekly: DOWNTREND — counter-trend LONG in bear market (elevated risk)"
+            )
 
         # ── 1. RSI Momentum (0–2 pts) ────────────────────────────────────
         if ind.rsi < 15:
@@ -365,18 +432,53 @@ class TAService:
             score += 1
             reasons.append(f"Price near key support (${ns:,.0f}, within 1.5%)")
 
-        # ── 6. Volume Trend (0–2 pts) — upgraded from +1 ─────────────────
-        if ind.volume_trend == "rising" and ind.volume_vs_avg > 1.5:
+        # ── 6. Volume Trend (0–2 pts) — direction-aware ──────────────────
+        # Volume only counts if the candle is BULLISH (confirming buy pressure)
+        if ind.volume_trend == "rising" and ind.volume_vs_avg > 1.5 and ind.last_candle_bullish:
             score += 2
-            reasons.append(f"Strong rising volume ({ind.volume_vs_avg:.1f}x avg) 🔥")
-        elif ind.volume_trend == "rising" and ind.volume_vs_avg > 1.2:
+            reasons.append(f"Strong bullish volume spike ({ind.volume_vs_avg:.1f}x avg) 🔥")
+        elif ind.volume_trend == "rising" and ind.volume_vs_avg > 1.2 and ind.last_candle_bullish:
             score += 1
-            reasons.append(f"Rising volume ({ind.volume_vs_avg:.1f}x avg)")
+            reasons.append(f"Bullish rising volume ({ind.volume_vs_avg:.1f}x avg)")
+        elif ind.volume_trend == "rising" and not ind.last_candle_bullish:
+            reasons.append(f"⚠️ Volume spike on bearish candle — sell pressure, not counted for LONG")
 
-        # ── 7. Daily Uptrend bonus (0–1 pt) ──────────────────────────────
-        if daily_trend == "uptrend":
+        # ── 7. Daily + Weekly alignment bonus (0–1 pt) ──────────────────
+        # Full +1 only when weekly trend ALSO confirms the direction.
+        # Counter-weekly daily = relief rally = bonus withheld (risk factor).
+        if daily_trend == "uptrend" and not weekly_counter:
             score += 1
-            reasons.append("Daily trend aligned: UPTREND ✅")
+            reasons.append("Daily + Weekly aligned: UPTREND ✅")
+        elif daily_trend == "uptrend" and weekly_counter:
+            reasons.append("Daily UPTREND (0 pts — counter-weekly bear rally, bonus withheld)")
+
+        # ── 8. ADX Market Regime bonus (0–2 pts) ─────────────────────────
+        # TRENDING (ADX > 25): Reward MACD crossover + short/medium MA momentum
+        # RANGING  (ADX < 20): Reward BB extreme + RSI extreme (mean-reversion)
+        # NOTE: ADX has ~5-7 candle lag — trending bonus may be absent at the
+        # best entry candles (early trend) and still present near trend exhaustion.
+        # This is a known trade-off; users should not rely solely on the regime label.
+        regime = ind.market_regime
+        if regime == "trending":  # ADX > 25
+            reasons.append(f"📊 Regime: TRENDING (ADX {ind.adx:.1f}) — trend-following signals amplified")
+            if ind.macd_crossover == "bullish":
+                score += 1
+                reasons.append("  → Trending bonus: MACD crossover +1 in strong trend")
+            # Only require MA20 > MA50 (short/medium term momentum)
+            # MA200 on 4H is ~800 days — too slow to reflect early bull runs
+            if ind.ma20 > ind.ma50:
+                score += 1
+                reasons.append("  → Trending bonus: MA20 > MA50 momentum +1")
+        elif regime == "ranging":  # ADX < 20
+            reasons.append(f"📊 Regime: RANGING (ADX {ind.adx:.1f}) — mean-reversion signals amplified")
+            if ind.current_price <= ind.bb_lower:
+                score += 1
+                reasons.append("  → Ranging bonus: BB lower touch +1 in sideways market")
+            if ind.rsi < 30:
+                score += 1
+                reasons.append("  → Ranging bonus: RSI oversold +1 in sideways market")
+        else:  # transitional 20–25 — high-noise zone, no bonus
+            reasons.append(f"📊 Regime: TRANSITIONAL (ADX {ind.adx:.1f}) — standard scoring, no regime bonus")
 
         return score, reasons
 
@@ -384,17 +486,34 @@ class TAService:
         self,
         ind: IndicatorResult,
         daily_trend: str = "sideways",
+        weekly_trend: str = "sideways",
     ) -> tuple[int, list[str]]:
         """
         Confluence scoring for SHORT signal.
         Scale: 0–10. Threshold: 6 to fire signal.
+
+        3-Layer MTF Filter (mirror of LONG):
+          L2 — Daily: block if UPTREND
+          L3 — Weekly: hard block if weekly+daily both UPTREND;
+                        soft warning if weekly UPTREND alone (daily dip in bull market)
         """
         score = 0
         reasons: list[str] = []
 
-        # ── [FILTER] Block counter-trend signals ─────────────────────────
+        # ── [L2] Block if daily is bullish ───────────────────────────────
         if daily_trend == "uptrend":
             return 0, ["❌ Blocked: Daily trend is UPTREND — no short signals"]
+
+        # ── [L3] Weekly macro trend check ────────────────────────────────
+        # Hard block: weekly AND daily both bullish — bull market, no SHORT
+        if weekly_trend == "uptrend" and daily_trend == "uptrend":
+            return 0, ["❌ Blocked: Weekly + Daily UPTREND — macro bull market"]
+        # Soft warning: weekly bullish but daily shows a counter-trend pullback
+        weekly_counter = (weekly_trend == "uptrend")
+        if weekly_counter:
+            reasons.append(
+                "⚠️ Weekly: UPTREND — counter-trend SHORT in bull market (elevated risk)"
+            )
 
         # ── 1. RSI (0–2 pts) ─────────────────────────────────────────────
         if ind.rsi > 85:
@@ -437,18 +556,47 @@ class TAService:
             score += 1
             reasons.append(f"Price near key resistance (${nr:,.0f}, within 1.5%)")
 
-        # ── 6. Volume Trend (0–2 pts) — upgraded from +1 ─────────────────
-        if ind.volume_trend == "rising" and ind.volume_vs_avg > 1.5:
+        # ── 6. Volume Trend (0–2 pts) — direction-aware ──────────────────
+        # Volume only counts if the candle is BEARISH (confirming sell pressure)
+        if ind.volume_trend == "rising" and ind.volume_vs_avg > 1.5 and ind.last_candle_bearish:
             score += 2
-            reasons.append(f"Strong rising volume ({ind.volume_vs_avg:.1f}x avg) 🔥")
-        elif ind.volume_trend == "rising" and ind.volume_vs_avg > 1.2:
+            reasons.append(f"Strong bearish volume spike ({ind.volume_vs_avg:.1f}x avg) 🔥")
+        elif ind.volume_trend == "rising" and ind.volume_vs_avg > 1.2 and ind.last_candle_bearish:
             score += 1
-            reasons.append(f"Rising volume ({ind.volume_vs_avg:.1f}x avg)")
+            reasons.append(f"Bearish rising volume ({ind.volume_vs_avg:.1f}x avg)")
+        elif ind.volume_trend == "rising" and not ind.last_candle_bearish:
+            reasons.append(f"⚠️ Volume spike on bullish candle — buy pressure, not counted for SHORT")
 
-        # ── 7. Daily Downtrend bonus (0–1 pt) ────────────────────────────
-        if daily_trend == "downtrend":
+        # ── 7. Daily + Weekly alignment bonus (0–1 pt) ──────────────────
+        # Full +1 only when weekly trend ALSO confirms the bearish direction.
+        if daily_trend == "downtrend" and not weekly_counter:
             score += 1
-            reasons.append("Daily trend aligned: DOWNTREND ✅")
+            reasons.append("Daily + Weekly aligned: DOWNTREND ✅")
+        elif daily_trend == "downtrend" and weekly_counter:
+            reasons.append("Daily DOWNTREND (0 pts — counter-weekly bull dip, bonus withheld)")
+
+        # ── 8. ADX Market Regime bonus (0–2 pts) ─────────────────────────
+        # NOTE: ADX has ~5-7 candle lag (same caveat as LONG scoring above).
+        regime = ind.market_regime
+        if regime == "trending":  # ADX > 25
+            reasons.append(f"📊 Regime: TRENDING (ADX {ind.adx:.1f}) — trend-following signals amplified")
+            if ind.macd_crossover == "bearish":
+                score += 1
+                reasons.append("  → Trending bonus: MACD crossover +1 in strong trend")
+            # Only require MA20 < MA50 (short/medium term bearish momentum)
+            if ind.ma20 < ind.ma50:
+                score += 1
+                reasons.append("  → Trending bonus: MA20 < MA50 momentum +1")
+        elif regime == "ranging":  # ADX < 20
+            reasons.append(f"📊 Regime: RANGING (ADX {ind.adx:.1f}) — mean-reversion signals amplified")
+            if ind.current_price >= ind.bb_upper:
+                score += 1
+                reasons.append("  → Ranging bonus: BB upper touch +1 in sideways market")
+            if ind.rsi > 70:
+                score += 1
+                reasons.append("  → Ranging bonus: RSI overbought +1 in sideways market")
+        else:  # transitional 20–25 — high-noise zone, no bonus
+            reasons.append(f"📊 Regime: TRANSITIONAL (ADX {ind.adx:.1f}) — standard scoring, no regime bonus")
 
         return score, reasons
 
@@ -460,27 +608,39 @@ class TAService:
         entry: float,
         ind: IndicatorResult,
         use_limit_entry: bool = True,
+        is_tier_b: bool = False,
     ) -> dict:
         """
         Calculate TP1/TP2/TP3 and SL based on ATR + swing levels.
         v2: Adds optimal limit entry (Fib 0.618 retracement) and
             classifies entry as 'limit' vs 'market'.
+        is_tier_b: If True, use tighter SL (1.0x ATR) for weaker setups.
         Returns dict with entry zones, sl, tp1, tp2, tp3, R:R.
         """
         atr = ind.atr
+        # Tier B (score 6–7) uses tighter SL to limit risk on weaker setups
+        sl_atr_mult = 1.0 if is_tier_b else 1.5
 
         if side == "long":
-            nearest_support = ind.nearest_support or (entry - atr * 2)
+            nearest_support = ind.nearest_support
 
-            # SL: below nearest support + buffer, at least 1.5×ATR from entry
-            sl = min(nearest_support - atr * 0.5, entry - atr * 1.5)
+            if nearest_support is not None:
+                # Use swing support + buffer, but don't let SL be wider than sl_atr_mult
+                sl_from_support = nearest_support - atr * 0.5
+                sl_from_atr = entry - atr * sl_atr_mult
+                sl = min(sl_from_support, sl_from_atr)  # pick tighter of the two
+                sl = max(sl, entry - atr * (sl_atr_mult + 0.5))  # floor: never wider than mult+0.5
+            else:
+                # No swing level — use pure ATR-based SL
+                sl = entry - atr * sl_atr_mult
 
             # Entry Zone: optimal limit entry at Fib 0.618 retracement of last move
             last_candle = ind.last_candles[-1] if ind.last_candles else None
             if last_candle and use_limit_entry:
                 candle_range = last_candle["high"] - last_candle["low"]
                 limit_entry = last_candle["high"] - candle_range * 0.618
-                limit_entry = max(limit_entry, nearest_support + atr * 0.3)
+                if nearest_support is not None:
+                    limit_entry = max(limit_entry, nearest_support + atr * 0.3)
             else:
                 limit_entry = entry
 
@@ -493,19 +653,25 @@ class TAService:
             entry_type = "LIMIT" if abs(limit_entry - entry) > atr * 0.1 else "MARKET"
 
         else:  # short
-            nearest_resistance = ind.nearest_resistance or (entry + atr * 2)
+            nearest_resistance = ind.nearest_resistance
 
-            # Cap resistance-based SL — don't use if it's too far (> 3×ATR)
-            if nearest_resistance - entry > atr * 3:
-                nearest_resistance = entry + atr * 2
+            if nearest_resistance is None:
+                nearest_resistance = entry + atr * sl_atr_mult
 
-            sl = max(nearest_resistance + atr * 0.5, entry + atr * 1.5)
+            # Cap resistance-based SL — don't use if too far (> sl_atr_mult + 1.5)
+            if nearest_resistance - entry > atr * (sl_atr_mult + 1.5):
+                nearest_resistance = entry + atr * sl_atr_mult
+
+            sl_from_resistance = nearest_resistance + atr * 0.5
+            sl_from_atr = entry + atr * sl_atr_mult
+            sl = max(sl_from_resistance, sl_from_atr)
 
             last_candle = ind.last_candles[-1] if ind.last_candles else None
             if last_candle and use_limit_entry:
                 candle_range = last_candle["high"] - last_candle["low"]
                 limit_entry = last_candle["low"] + candle_range * 0.618
-                limit_entry = min(limit_entry, nearest_resistance - atr * 0.3)
+                if nearest_resistance is not None:
+                    limit_entry = min(limit_entry, nearest_resistance - atr * 0.3)
             else:
                 limit_entry = entry
 

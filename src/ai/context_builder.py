@@ -26,6 +26,8 @@ class MarketContext:
     ma50: Optional[float] = None
     ma200: Optional[float] = None
     atr: Optional[float] = None
+    adx: Optional[float] = None                  # ADX(14) — trend strength
+    market_regime: Optional[str] = None          # "trending" | "ranging" | "transitional"
     funding_rate: Optional[float] = None
     fear_greed_index: Optional[int] = None
     fear_greed_label: Optional[str] = None
@@ -58,6 +60,15 @@ def build_analysis_context(ctx: MarketContext) -> str:
 
     if ctx.daily_trend:
         lines.append(f"Daily (1D) Macro Trend: {ctx.daily_trend.upper()}")
+
+    if ctx.adx is not None:
+        regime_str = ctx.market_regime.upper() if ctx.market_regime else "UNKNOWN"
+        lines.append(
+            f"Market Regime: {regime_str} (ADX={ctx.adx:.1f}) — "
+            + ("use trend-following indicators (MACD/MA)" if regime_str == "TRENDING" else
+               "use mean-reversion indicators (BB/RSI)" if regime_str == "RANGING" else
+               "mixed signals, apply standard scoring")
+        )
 
     if ctx.rsi is not None:
         lines.append(f"RSI(14): {ctx.rsi:.1f}")

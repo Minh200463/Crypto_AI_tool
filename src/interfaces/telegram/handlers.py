@@ -3,11 +3,35 @@ Telegram Bot handlers — all commands for Milestone 2+3.
 Thin layer: parse command → call service → format → reply.
 """
 import asyncio
+import httpx
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from src.database.signal_repository import init_db, SignalRecord
+from src.database.settings_repository import (
+    init_settings_table,
+    get_user_settings,
+    DEFAULT_EQUITY,
+    DEFAULT_RISK_PCT,
+)
+from src.core.position_sizer import calculate_position_size, format_position_block
+from src.core.signal_tracker import (
+    build_signal_record,
+    check_open_signals,
+    format_stats_message,
+    format_recent_signals_message,
+    log_signal,
+)
+
 logger = logging.getLogger(__name__)
+
+# Ensure DB tables are ready on first import
+try:
+    init_db()
+    init_settings_table()
+except Exception as _e:
+    logger.warning("DB init failed: %s", _e)
 
 DISCLAIMER = "\n\n⚠️ _Tham khảo kỹ thuật — không phải tư vấn tài chính\\._"
 
@@ -292,10 +316,11 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         binance = _get_binance(context)
         ta_svc = TAService()
 
-        # ── Fetch 4H + 1D candles for MTF filter ──────────────────────
-        candles_4h, candles_1d = await asyncio.gather(
+        # ── Fetch 4H + 1D + 1W candles (3-layer MTF filter) ──────────
+        candles_4h, candles_1d, candles_1w = await asyncio.gather(
             binance.get_klines(symbol, interval="4h", limit=200),
             binance.get_klines(symbol, interval="1d", limit=200),
+            binance.get_klines(symbol, interval="1w", limit=100),  # ~2 years
         )
 
         if len(candles_4h) < 50:
@@ -304,20 +329,24 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         ind = ta_svc.compute_indicators(_normalize_symbol(symbol), "4h", candles_4h)
 
-        # ── MTF: Get daily trend ───────────────────────────────────────
-        daily_trend = "sideways"
-        if len(candles_1d) >= 50:
-            daily_trend = ta_svc.get_daily_trend(candles_1d)
+        # ── MTF: 3-layer trend filter (1W → 1D → 4H) ─────────────────
+        daily_trend  = ta_svc.get_daily_trend(candles_1d)  if len(candles_1d)  >= 50 else "sideways"
+        weekly_trend = ta_svc.get_weekly_trend(candles_1w) if len(candles_1w) >= 50 else "sideways"
+
+        # Weekly trend icon
+        weekly_icons = {"uptrend": "📈", "downtrend": "📉", "sideways": "↔️"}
+        weekly_icon  = weekly_icons.get(weekly_trend, "↔️")
 
         await msg.edit_text(
-            f"⏳ *{symbol}* — 1D Trend: `{daily_trend.upper()}` | Đang chấm điểm setup...",
+            f"⏳ *{symbol}* — 1W: {weekly_icon}`{weekly_trend.upper()}` | "
+            f"1D: `{daily_trend.upper()}` | Đang chấm điểm setup...",
             parse_mode="Markdown"
         )
 
-        # ── Confluence Scoring (v2: 10-point, 2-tier) ─────────────────
+        # ── Confluence Scoring (v2: 10-point, 3-layer MTF) ───────────
         from src.core.ta_service import SCORE_TIER_A, SCORE_TIER_B, SCORE_THRESHOLD
-        long_score, long_reasons = ta_svc.score_long_setup(ind, daily_trend)
-        short_score, short_reasons = ta_svc.score_short_setup(ind, daily_trend)
+        long_score,  long_reasons  = ta_svc.score_long_setup(ind,  daily_trend, weekly_trend)
+        short_score, short_reasons = ta_svc.score_short_setup(ind, daily_trend, weekly_trend)
 
         if long_score >= SCORE_THRESHOLD:
             side, score, reasons, emoji = "long", long_score, long_reasons, "🟢 LONG"
@@ -327,34 +356,99 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await msg.edit_text(
                 f"⚖️ *{symbol}* — Không có setup chất lượng cao\n"
                 f"Long: `{long_score}/10` | Short: `{short_score}/10`\n"
-                f"📊 Xu hướng 1D: `{daily_trend.upper()}`\n\n"
+                f"📊 Xu hướng 1W: {weekly_icon}`{weekly_trend.upper()}` | 1D: `{daily_trend.upper()}`\n\n"
                 f"_Cần tối thiểu {SCORE_THRESHOLD}/10 điểm để kích hoạt signal._\n"
                 f"Hãy kiên nhẫn chờ setup tốt hơn. 🎯",
                 parse_mode="Markdown"
             )
             return
 
-        # ── 2-tier position size guidance ─────────────────────────────
-        if score >= SCORE_TIER_A:
-            signal_grade = "⭐⭐⭐ MẠNH"
-            size_advice = "Full size (1–2% vốn)"
+        # ── 2-tier: position size + SL tightness ──────────────────────
+        is_tier_b = score < SCORE_TIER_A
+        tier_label = "B" if is_tier_b else "A"
+        signal_grade = "⭐⭐⭐ MẠNH" if not is_tier_b else "⭐⭐ KHÁ"
+
+        levels = ta_svc.calculate_trade_levels(side, ind.current_price, ind, is_tier_b=is_tier_b)
+
+        # ── Position Sizing (auto from user settings) ─────────────────
+        user_id = update.effective_user.id if update.effective_user else 0
+        user_cfg = get_user_settings(user_id)
+        equity   = user_cfg["equity"]
+        risk_pct = user_cfg["risk_pct"]
+        sl_pct   = levels.get("sl_pct") or 2.0
+
+        ps = calculate_position_size(
+            equity=equity,
+            risk_pct=risk_pct,
+            entry_price=ind.current_price,
+            sl_pct=sl_pct,
+            tier=tier_label,
+        )
+
+        # Show auto-calculation if user configured equity; else show hint
+        user_has_config = not (equity == DEFAULT_EQUITY and risk_pct == DEFAULT_RISK_PCT)
+        if user_has_config:
+            sizing_block = format_position_block(ps) + "\n"
         else:
-            signal_grade = "⭐⭐ KHÁ"
-            size_advice = "Half size (0.5–1% vốn) — thận trọng"
+            static = "Full size (1–2% vốn)" if not is_tier_b else "Half size (0.5–1% vốn) — thận trọng"
+            sizing_block = (
+                f"💼 *Position size gợi ý:* _{static}_\n"
+                f"   💡 _Dùng /setequity 10000 để tính chính xác theo vốn của bạn_\n"
+            )
+
+        # ── Build signal text based on tier ───────────────────────────
+        entry_block = (
+            f"📍 *Entry {levels['entry_type']}:*\n"
+            f"   Market: `${levels['entry']:,.2f}`\n"
+            f"   Limit tối ưu: `${levels['limit_entry']:,.2f}` _(Fib 0.618)_\n\n"
+        )
+        sl_block = f"🛡 *Stop Loss:*  `${levels['sl']:,.2f}` `(-{levels['sl_pct']}%)`\n"
+
+        if is_tier_b:
+            tp_block = (
+                f"🎯 *TP1 (chốt 100%):* `${levels['tp1']:,.2f}` `(R:R 1:{levels['rr1']})`\n"
+                f"⚠️ _Setup Tier B: Chốt 100% vị thế tại TP1. Không giữ lệnh chờ TP2._\n"
+            )
+        else:
+            tp_block = (
+                f"🎯 *TP1:* `${levels['tp1']:,.2f}` `(R:R 1:{levels['rr1']})`\n"
+                f"🎯 *TP2:* `${levels['tp2']:,.2f}` `(R:R 1:{levels['rr2']})`\n"
+                f"🎯 *TP3:* `${levels['tp3']:,.2f}` _(1:3 target)_\n"
+            )
+
+        # ── Regime label for display ───────────────────────────────────
+        regime = ind.market_regime
+        regime_labels = {
+            "trending":     f"📈 TRENDING  (ADX {ind.adx:.1f})",
+            "ranging":      f"↔️ RANGING   (ADX {ind.adx:.1f})",
+            "transitional": f"⚡ NEUTRAL   (ADX {ind.adx:.1f})",
+        }
+        regime_label = regime_labels.get(regime, f"ADX {ind.adx:.1f}")
+
+        # ── Confidence label (replaces raw score display) ─────────────
+        if score >= 9:
+            confidence_label = f"Rất cao ({score}/10)"
+        elif score >= 7:
+            confidence_label = f"Cao ({score}/10)"
+        else:
+            confidence_label = f"Trung bình ({score}/10)"
+
+        # ── Risk reminder block (mandatory for Tier A) ─────────────────
+        tier_a_warning = (
+            "\n⚠️ _Tier A không miễn trừ rủi ro — luôn tôn trọng SL._\n"
+            if not is_tier_b else ""
+        )
 
         text = (
             f"🎯 *Signal: {symbol} — 4H*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Lệnh: {emoji} | Chất lượng: {signal_grade}\n"
-            f"Điểm hợp lưu: `{score}/10` | Xu hướng 1D: `{daily_trend.upper()}`\n"
-            f"💼 *Position size gợi ý:* _{size_advice}_\n\n"
-            f"📍 *Entry {levels['entry_type']}:*\n"
-            f"   Market: `${levels['entry']:,.2f}`\n"
-            f"   Limit tối ưu: `${levels['limit_entry']:,.2f}` _(Fib 0.618)_\n\n"
-            f"🛡 *Stop Loss:*  `${levels['sl']:,.2f}` `(-{levels['sl_pct']}%)`\n"
-            f"🎯 *TP1:* `${levels['tp1']:,.2f}` `(R:R 1:{levels['rr1']})`\n"
-            f"🎯 *TP2:* `${levels['tp2']:,.2f}` `(R:R 1:{levels['rr2']})`\n"
-            f"🎯 *TP3:* `${levels['tp3']:,.2f}` _(1:3 target)_\n\n"
+            f"Độ tin cậy: `{confidence_label}`\n"
+            f"📅 1W: {weekly_icon}`{weekly_trend.upper()}` | 1D: `{daily_trend.upper()}`\n"
+            f"📊 Regime: `{regime_label}`\n"
+            + tier_a_warning
+            + sizing_block + "\n"
+            + entry_block + sl_block + tp_block + "\n"
             f"🔍 *Tín hiệu kỹ thuật ({score}/10):*\n" +
             "\n".join([f"• {r}" for r in reasons])
         )
@@ -381,6 +475,8 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ma50=ind.ma50,
             ma200=ind.ma200,
             atr=ind.atr,
+            adx=ind.adx,
+            market_regime=ind.market_regime,
             volume_vs_avg=ind.volume_vs_avg,
             volume_trend=ind.volume_trend,
             daily_trend=daily_trend,
@@ -389,7 +485,7 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             resistance_levels=ind.resistance_levels,
         )
 
-        prompt = build_signal_context(ctx, score, MAX_SCORE, reasons, side, levels)
+        prompt = build_signal_context(ctx, score, 10, reasons, side, levels)
         prompt += "\nReply in Vietnamese in 4-5 sentences."
 
         try:
@@ -400,11 +496,29 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.warning("AI signal failed: %s", ai_err)
             await msg.edit_text(text + "\n\n❌ _Lỗi kết nối AI._" + DISCLAIMER, parse_mode="Markdown")
 
-    except Exception as e:
-        logger.error("Signal error %s: %s", symbol, e)
-        await msg.edit_text(f"❌ Lỗi xử lý tín hiệu `{symbol}`. Thử lại sau.")
+        # ── Log signal to DB (non-blocking — don't fail if DB has error) ──────────
+        try:
+            rec = build_signal_record(
+                symbol=symbol,
+                side=side,
+                score=score,
+                tier="B" if is_tier_b else "A",
+                daily_trend=daily_trend,
+                market_regime=ind.market_regime,
+                adx=ind.adx,
+                levels=levels,
+            )
+            log_signal(rec)
+        except Exception as db_err:
+            logger.warning("Signal DB log failed (non-critical): %s", db_err)
 
-        logger.error("Signal error %s: %s", symbol, e)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 400:
+            await msg.edit_text(f"❌ Mã giao dịch `{symbol}` không tồn tại trên sàn Binance (cả Spot và Futures).")
+        else:
+            await msg.edit_text(f"❌ Lỗi mạng khi lấy dữ liệu `{symbol}` từ Binance. Thử lại sau.")
+    except Exception as e:
+        logger.error("Signal error %s: %s", symbol, e, exc_info=True)
         await msg.edit_text(f"❌ Lỗi xử lý tín hiệu `{symbol}`. Thử lại sau.")
 
 
@@ -619,3 +733,274 @@ async def clearall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.effective_message.reply_text(f"✅ Đã xóa *{count}* alerts.", parse_mode="Markdown")
     else:
         await update.effective_message.reply_text("ℹ️ Không có alert nào để xóa.")
+
+
+# ─── /stats — Win/Loss statistics ────────────────────────────────────────────
+
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /stats [SYMBOL]
+    Show win/loss statistics. Optionally filter by symbol.
+    Examples: /stats  |  /stats BTC
+    """
+    if not update.effective_message:
+        return
+
+    args = context.args or []
+    symbol = args[0].upper() + "USDT" if args else None
+    if args and args[0].upper().endswith("USDT"):
+        symbol = args[0].upper()
+
+    msg = await update.effective_message.reply_text("📊 _Đang tính toán thống kê..._", parse_mode="Markdown")
+    try:
+        text = format_stats_message(symbol)
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("Stats error: %s", e)
+        await msg.edit_text("❌ Lỗi tải thống kê.")
+
+
+# ─── /history — Recent signal log ────────────────────────────────────────────
+
+async def history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /history
+    Show the last 8 signals with their outcomes.
+    """
+    if not update.effective_message:
+        return
+
+    msg = await update.effective_message.reply_text("📜 _Đang tải lịch sử..._", parse_mode="Markdown")
+    try:
+        text = format_recent_signals_message(limit=8)
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("History error: %s", e)
+        await msg.edit_text("❌ Lỗi tải lịch sử signal.")
+
+
+# ─── /checkoutcomes — Manual trigger outcome check ───────────────────────────
+
+async def checkoutcomes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /checkoutcomes
+    Manually trigger a check of all open signals against current prices.
+    """
+    if not update.effective_message:
+        return
+
+    msg = await update.effective_message.reply_text(
+        "🔄 _Đang kiểm tra kết quả các signal đang mở..._", parse_mode="Markdown"
+    )
+    try:
+        binance = context.bot_data.get("binance")
+        if not binance:
+            await msg.edit_text("❌ Không tìm thấy Binance client.")
+            return
+
+        resolved = await check_open_signals(binance)
+
+        if not resolved:
+            await msg.edit_text("✅ Không có signal nào đạt TP/SL. Tất cả vẫn đang mở.")
+            return
+
+        STATUS_ICON = {
+            "tp1_hit": "✅ TP1 chạm",
+            "tp2_hit": "✅ TP2 chạm",
+            "sl_hit":  "❌ SL chạm",
+            "expired": "⌛ Hết hạn",
+        }
+        lines = [f"🔔 *{len(resolved)} signal vừa được cập nhật:*\n"]
+        for r in resolved:
+            icon = STATUS_ICON.get(r["status"], r["status"])
+            side_icon = "🟢" if r["side"] == "long" else "🔴"
+            pnl = r["pnl_pct"]
+            pnl_str = f"`{pnl:+.2f}%`" if pnl is not None else "—"
+            lines.append(
+                f"{side_icon} *{r['symbol']}* {r['side'].upper()} | {icon} | PnL: {pnl_str}\n"
+                f"  Entry: `${r['entry']:,.2f}` → Outcome: `${r['outcome_price']:,.2f}`"
+            )
+
+        await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error("Checkoutcomes error: %s", e)
+        await msg.edit_text("❌ Lỗi kiểm tra kết quả.")
+
+
+# ─── /setequity — Configure account equity ───────────────────────────────────
+
+async def setequity_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /setequity <amount>
+    Set your total trading account equity in USDT.
+    This enables automatic position size calculation on every signal.
+
+    Examples:
+      /setequity 1000     → $1,000 USDT
+      /setequity 10000    → $10,000 USDT
+    """
+    if not update.effective_message or not update.effective_user:
+        return
+
+    args = context.args or []
+    if not args:
+        # Show current setting
+        cfg = get_user_settings(update.effective_user.id)
+        await update.effective_message.reply_text(
+            f"💰 *Vốn hiện tại:* `${cfg['equity']:,.2f}` USDT\n"
+            f"📊 *Risk/lệnh:* `{cfg['risk_pct']}%`\n\n"
+            f"Dùng `/setequity <số tiền>` để thay đổi.\n"
+            f"Ví dụ: `/setequity 10000`",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        equity = float(args[0].replace(",", ""))
+        if equity <= 0:
+            raise ValueError("Equity must be positive")
+        if equity > 10_000_000:
+            raise ValueError("Equity too large (max 10,000,000)")
+
+        from src.database.settings_repository import set_equity
+        set_equity(update.effective_user.id, equity)
+
+        cfg = get_user_settings(update.effective_user.id)
+        # Show example calculation with BTC at ~65k
+        example_sl = 2.0
+        example_ps = calculate_position_size(equity, cfg["risk_pct"], 65000, example_sl, "A")
+        await update.effective_message.reply_text(
+            f"✅ *Vốn đã cập nhật: `${equity:,.2f}` USDT*\n\n"
+            f"📊 *Ví dụ với BTC @ $65,000 (SL 2%):*\n"
+            f"   Rủi ro {cfg['risk_pct']}% = `${example_ps.risk_amount_usdt:,.2f}` USDT\n"
+            f"   Vào lệnh: `${example_ps.position_usdt:,.2f}` USDT\n"
+            f"   Số lượng: `{example_ps.quantity:.6f}` BTC\n"
+            f"   Đòn bẩy hiệu quả: `~{example_ps.effective_leverage:.1f}x`\n\n"
+            f"_Signal tiếp theo sẽ tính toán tự động theo vốn này._",
+            parse_mode="Markdown"
+        )
+    except ValueError as e:
+        await update.effective_message.reply_text(
+            f"❌ Số tiền không hợp lệ: `{args[0]}`\n"
+            f"Ví dụ đúng: `/setequity 10000`",
+            parse_mode="Markdown"
+        )
+
+
+# ─── /setrisk — Configure risk % per trade ───────────────────────────────────
+
+async def setrisk_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /setrisk <percent>
+    Set max % of equity to risk per trade (Tier A).
+    Tier B signals automatically use half this value.
+
+    Recommended: 0.5% – 2% per trade.
+    Examples:
+      /setrisk 1     → risk 1% per Tier A trade, 0.5% per Tier B
+      /setrisk 0.5   → risk 0.5% per Tier A trade, 0.25% per Tier B
+    """
+    if not update.effective_message or not update.effective_user:
+        return
+
+    args = context.args or []
+    if not args:
+        cfg = get_user_settings(update.effective_user.id)
+        await update.effective_message.reply_text(
+            f"📊 *Risk/lệnh hiện tại:*\n"
+            f"   Tier A: `{cfg['risk_pct']}%`\n"
+            f"   Tier B: `{cfg['risk_pct'] / 2}%` (tự động 50%)\n\n"
+            f"Dùng `/setrisk <phần trăm>` để thay đổi.\n"
+            f"Khuyến nghị: 0.5% – 2%\n"
+            f"Ví dụ: `/setrisk 1`",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        risk_pct = float(args[0].replace("%", ""))
+        if risk_pct <= 0 or risk_pct > 10:
+            raise ValueError("Risk must be between 0.1% and 10%")
+
+        from src.database.settings_repository import set_risk_pct
+        set_risk_pct(update.effective_user.id, risk_pct)
+
+        await update.effective_message.reply_text(
+            f"✅ *Risk/lệnh đã cập nhật:*\n"
+            f"   ⭐⭐⭐ Tier A: `{risk_pct}%` của vốn\n"
+            f"   ⭐⭐ Tier B: `{risk_pct / 2}%` của vốn (tự động giảm 50%)\n\n"
+            f"_Signal tiếp theo sẽ tính toán tự động theo mức risk này._",
+            parse_mode="Markdown"
+        )
+    except ValueError:
+        await update.effective_message.reply_text(
+            f"❌ Phần trăm không hợp lệ: `{args[0]}`\n"
+            f"Nhập số từ 0.1 đến 10. Ví dụ: `/setrisk 1`",
+            parse_mode="Markdown"
+        )
+
+
+# ─── /possize — Manual position size calculator ──────────────────────────────
+
+async def possize_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /possize <entry> <sl_price> [tier]
+    Manually calculate position size for any entry/SL combination.
+
+    Examples:
+      /possize 65000 63000        → Tier A calculation
+      /possize 65000 63000 B      → Tier B calculation (half risk)
+      /possize 3200 3100          → ETH example
+    """
+    if not update.effective_message or not update.effective_user:
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await update.effective_message.reply_text(
+            "📐 *Tính Position Size thủ công*\n\n"
+            "Cú pháp: `/possize <entry> <sl_price> [tier]`\n"
+            "Ví dụ:\n"
+            "  `/possize 65000 63000`     → Tier A\n"
+            "  `/possize 65000 63000 B`   → Tier B\n\n"
+            "_Vốn và Risk% lấy từ cài đặt của bạn (/setequity, /setrisk)_",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        entry_price = float(args[0].replace(",", ""))
+        sl_price    = float(args[1].replace(",", ""))
+        tier        = args[2].upper() if len(args) > 2 else "A"
+        if tier not in ("A", "B"):
+            tier = "A"
+
+        if entry_price <= 0 or sl_price <= 0:
+            raise ValueError("Prices must be positive")
+
+        sl_pct = abs(entry_price - sl_price) / entry_price * 100
+
+        cfg = get_user_settings(update.effective_user.id)
+        ps = calculate_position_size(
+            equity=cfg["equity"],
+            risk_pct=cfg["risk_pct"],
+            entry_price=entry_price,
+            sl_pct=sl_pct,
+            tier=tier,
+        )
+
+        tier_icon = "⭐⭐⭐" if tier == "A" else "⭐⭐"
+        await update.effective_message.reply_text(
+            f"📐 *Tính Position Size*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Tier: {tier_icon} Tier {tier}\n"
+            f"Entry: `${entry_price:,.2f}` | SL: `${sl_price:,.2f}` (`{sl_pct:.2f}%`)\n\n"
+            + format_position_block(ps),
+            parse_mode="Markdown"
+        )
+    except (ValueError, ZeroDivisionError) as e:
+        await update.effective_message.reply_text(
+            f"❌ Dữ liệu không hợp lệ. Ví dụ đúng:\n`/possize 65000 63000`",
+            parse_mode="Markdown"
+        )
