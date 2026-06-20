@@ -99,6 +99,11 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "`/analyze BTC` — TA đầy đủ \\(4H\\) kết hợp AI\n"
         "`/analyze ETH 1h` — TA theo timeframe\n"
         "`/signal BTC` — Setup giao dịch & AI nhận định\n\n"
+        "*📅 Spot vs Futures*\n"
+        "Bot tự detect thị trường khi bạn gọi lệnh\.\n"
+        "• 📊 *SPOT* — BTC, ETH, BNB, SOL\.\.\. \\(lờị thường\\)\n"
+        "• ⚡ *FUTURES* — XAGUSDT, XAU, các coin Futures\-only\n"
+        "Signal hiển thị badge rõ `\\[SPOT\\]` hoặc `\\[FUTURES\\]`\.\n\n"
         "*🔔 Cảnh báo*\n"
         "`/setalert BTC 70000` — Giá vượt ngưỡng\n"
         "`/setalert BTC 60000 below` — Giá xuống ngưỡng\n"
@@ -335,6 +340,10 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if oi_data and not isinstance(oi_data, Exception):
             ind.oi_change_pct = oi_data.get("oi_change_pct")
 
+        # Detect Spot vs Futures for display badge
+        mtype = await binance.detect_market_type(symbol)
+        mtype_badge = "⚡ FUTURES" if mtype == "futures" else ("📊 SPOT" if mtype == "spot" else "🔍 UNKNOWN")
+
         # ── MTF: 3-layer trend filter (1W → 1D → 4H) ─────────────────
         daily_trend  = ta_svc.get_daily_trend(candles_1d)  if not isinstance(candles_1d, Exception) and len(candles_1d)  >= 50 else "sideways"
         weekly_trend = ta_svc.get_weekly_trend(candles_1w) if not isinstance(candles_1w, Exception) and len(candles_1w) >= 50 else "sideways"
@@ -360,7 +369,7 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             side, score, reasons, emoji = "short", short_score, short_reasons, "🔴 SHORT"
         else:
             await msg.edit_text(
-                f"⚖️ *{symbol}* — Không có setup chất lượng cao\n"
+                f"⚖️ *{symbol}* `{mtype_badge}` — Không có setup chất lượng cao\n"
                 f"Long: `{long_score}/10` | Short: `{short_score}/10`\n"
                 f"📊 Xu hướng 1W: {weekly_icon}`{weekly_trend.upper()}` | 1D: `{daily_trend.upper()}`\n\n"
                 f"_Cần tối thiểu {SCORE_THRESHOLD}/10 điểm để kích hoạt signal._\n"
@@ -456,8 +465,8 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
         text = (
-            f"🎯 *Signal: {symbol} — 4H*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎯 *Signal: {symbol} — 4H* `{mtype_badge}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Lệnh: {emoji} | Chất lượng: {signal_grade}\n"
             f"Độ tin cậy: `{confidence_label}`\n"
             f"📅 1W: {weekly_icon}`{weekly_trend.upper()}` | 1D: `{daily_trend.upper()}`\n"

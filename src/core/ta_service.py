@@ -374,25 +374,46 @@ class TAService:
     def _detect_fvg(self, df: pd.DataFrame, lookback: int = 20) -> list[dict]:
         """
         Detect Fair Value Gaps in last N candles.
+        Filters out FVGs that have already been filled by subsequent price action.
         Returns list of {"type": "bullish"|"bearish", "top": float, "bottom": float}
         """
         fvgs = []
-        for i in range(1, min(lookback, len(df) - 1)):
-            idx = -(i + 1)  # start from candle[-2] backwards
-            c_prev = df.iloc[idx - 1]
-            c_curr = df.iloc[idx]
-            c_next = df.iloc[idx + 1]
-            
-            body_size = abs(c_curr["close"] - c_curr["open"])
-            avg_body = df["close"].std() * 0.5  # Rough proxy for strong impulse
-            
-            # Bullish FVG
-            if c_prev["high"] < c_next["low"] and body_size > avg_body:
-                fvgs.append({"type": "bullish", "top": float(c_next["low"]), "bottom": float(c_prev["high"])})
-            # Bearish FVG
-            if c_prev["low"] > c_next["high"] and body_size > avg_body:
-                fvgs.append({"type": "bearish", "top": float(c_prev["low"]), "bottom": float(c_next["high"])})
-        return fvgs[:3]  # top 3 most recent FVGs
+        current_low  = float(df["low"].iloc[-1])
+        current_high = float(df["high"].iloc[-1])
+        # Use ATR-based threshold for impulse body (more robust than std)
+        atr_proxy = float((df["high"] - df["low"]).rolling(14).mean().iloc[-1])
+        impulse_threshold = atr_proxy * 0.5
+
+        # Scan from [-lookback] to [-3] (need c_prev, c_curr, c_next — all closed)
+        for i in range(lookback, 2, -1):
+            idx = -i
+            c_prev = df.iloc[idx - 1]  # candle before the impulse
+            c_curr = df.iloc[idx]      # impulse candle
+            c_next = df.iloc[idx + 1] # candle after (confirms gap)
+
+            body_size = abs(float(c_curr["close"]) - float(c_curr["open"]))
+            if body_size < impulse_threshold:
+                continue
+
+            # Bullish FVG: gap between c_prev.high and c_next.low
+            if float(c_prev["high"]) < float(c_next["low"]):
+                fvg_bottom = float(c_prev["high"])
+                fvg_top    = float(c_next["low"])
+                # Filter filled: price has dipped into or below the gap
+                if current_low <= fvg_bottom:
+                    continue  # already filled — skip
+                fvgs.append({"type": "bullish", "top": fvg_top, "bottom": fvg_bottom})
+
+            # Bearish FVG: gap between c_next.high and c_prev.low
+            elif float(c_prev["low"]) > float(c_next["high"]):
+                fvg_top    = float(c_prev["low"])
+                fvg_bottom = float(c_next["high"])
+                # Filter filled: price has risen into or above the gap
+                if current_high >= fvg_top:
+                    continue  # already filled — skip
+                fvgs.append({"type": "bearish", "top": fvg_top, "bottom": fvg_bottom})
+
+        return fvgs[:3]  # 3 most recent unfilled FVGs
 
     # ── MTF Trend Filter ─────────────────────────────────────────────────────
 
@@ -618,6 +639,17 @@ class TAService:
         else:  # transitional 20–25 — high-noise zone, no bonus
             reasons.append(f"📊 Regime: TRANSITIONAL (ADX {ind.adx:.1f}) — standard scoring, no regime bonus")
 
+
+        # ── 9. Session filter penalty (P3 fix) ──────────────────────────────
+        # Real -1 penalty (not just label downgrade) when Asia/Off-hours.
+        # Rationale: institutional liquidity is low — fakeout probability is higher.
+        _session = self.get_current_session()
+        if not _session["high_liquidity"]:
+            score = max(0, score - 1)
+            reasons.append(
+                f"⚠️ {_session['emoji']} {_session['label']}: Low-liquidity session — score -1"
+            )
+
         return score, reasons
 
     def score_short_setup(
@@ -763,6 +795,17 @@ class TAService:
         else:  # transitional 20–25 — high-noise zone, no bonus
             reasons.append(f"📊 Regime: TRANSITIONAL (ADX {ind.adx:.1f}) — standard scoring, no regime bonus")
 
+
+        # ── 9. Session filter penalty (P3 fix) ──────────────────────────────
+        # Real -1 penalty (not just label downgrade) when Asia/Off-hours.
+        # Rationale: institutional liquidity is low — fakeout probability is higher.
+        _session = self.get_current_session()
+        if not _session["high_liquidity"]:
+            score = max(0, score - 1)
+            reasons.append(
+                f"⚠️ {_session['emoji']} {_session['label']}: Low-liquidity session — score -1"
+            )
+
         return score, reasons
 
     # ── Entry Zone (v2) ──────────────────────────────────────────────────────
@@ -799,21 +842,60 @@ class TAService:
                 # No swing level — use pure ATR-based SL
                 sl = entry - atr * sl_atr_mult
 
-            # Entry Zone: optimal limit entry at Fib 0.618 retracement of last move
-            last_candle = ind.last_candles[-1] if ind.last_candles else None
-            if last_candle and use_limit_entry:
-                candle_range = last_candle["high"] - last_candle["low"]
-                limit_entry = last_candle["high"] - candle_range * 0.618
+            # Entry Zone: Fib 0.618 of last CLOSED candle (P1: [-2], not forming)
+            # Using closed candle prevents using mid-candle inflated highs/lows.
+            last_closed = ind.last_candles[-2] if len(ind.last_candles) >= 2 else (
+                ind.last_candles[-1] if ind.last_candles else None
+            )
+            if last_closed and use_limit_entry:
+                candle_range = last_closed["high"] - last_closed["low"]
+                limit_entry = last_closed["high"] - candle_range * 0.618
                 if nearest_support is not None:
                     limit_entry = max(limit_entry, nearest_support + atr * 0.3)
+                # Sanity guard: limit_entry must be below current price (it's a buy dip)
+                limit_entry = min(limit_entry, entry)
             else:
                 limit_entry = entry
 
-            # TPs: use next resistance levels, fallback to ATR multiples
+            # ── TPs: R:R-aware with minimum floor ─────────────────────────
+            # Problem solved: nearest_resistance can be very close in chop
+            # markets, giving R:R 1:0.1 which is not tradeable.
+            # Solution: enforce minimum R:R 1:1.5 floor for TP1.
+            sl_dist_long = abs(entry - sl)
+            min_tp1_dist = sl_dist_long * 1.5  # Minimum 1:1.5 R:R
+
             resistances = [r for r in ind.resistance_levels if r > entry]
-            tp1 = resistances[0] if len(resistances) > 0 else entry + atr * 2
-            tp2 = resistances[1] if len(resistances) > 1 else entry + atr * 4
-            tp3 = entry + abs(entry - sl) * 3  # 1:3 R:R target
+
+            # TP1: nearest resistance, but enforce min R:R 1:1.5
+            if resistances and (resistances[0] - entry) >= min_tp1_dist:
+                tp1 = resistances[0]
+            else:
+                # Resistance too close → use ATR-based TP1 (2x ATR)
+                tp1_atr = entry + atr * 2
+                tp1 = max(tp1_atr, entry + min_tp1_dist)
+
+            # TP2: next resistance or ATR*3, whichever is farther
+            tp2_from_level = resistances[1] if len(resistances) > 1 else entry + atr * 4
+            tp2_from_atr = entry + atr * 3
+            tp2 = max(tp2_from_level, tp2_from_atr)
+
+            # TP3: fixed 1:3 R:R from SL distance (always reliable)
+            tp3 = entry + sl_dist_long * 3
+
+            # FVG-aware TP boost: if an unfilled bullish FVG exists above entry,
+            # use its top as a potential TP target (institutional magnet)
+            for fvg in ind.fvg_zones:
+                if fvg["type"] == "bearish" and fvg["top"] > tp1:
+                    # Bearish FVG above = price magnet to fill it
+                    tp2 = max(tp2, fvg["top"])
+                    break
+
+            # Minimum spacing: TP1 < TP2 < TP3 (monotonically increasing)
+            tp1_dist = tp1 - entry
+            if tp2 - entry <= tp1_dist * 1.2:
+                tp2 = entry + tp1_dist * 2.0  # push TP2 to 2x TP1 distance
+            # TP3 must always be beyond TP2
+            tp3 = max(tp3, tp2 + tp1_dist)  # at least TP2 + one TP1-width
 
             entry_type = "LIMIT" if abs(limit_entry - entry) > atr * 0.1 else "MARKET"
 
@@ -831,19 +913,53 @@ class TAService:
             sl_from_atr = entry + atr * sl_atr_mult
             sl = max(sl_from_resistance, sl_from_atr)
 
-            last_candle = ind.last_candles[-1] if ind.last_candles else None
-            if last_candle and use_limit_entry:
-                candle_range = last_candle["high"] - last_candle["low"]
-                limit_entry = last_candle["low"] + candle_range * 0.618
+            # Entry Zone: Fib 0.618 of last CLOSED candle (P1: [-2])
+            last_closed = ind.last_candles[-2] if len(ind.last_candles) >= 2 else (
+                ind.last_candles[-1] if ind.last_candles else None
+            )
+            if last_closed and use_limit_entry:
+                candle_range = last_closed["high"] - last_closed["low"]
+                limit_entry = last_closed["low"] + candle_range * 0.618
                 if nearest_resistance is not None:
                     limit_entry = min(limit_entry, nearest_resistance - atr * 0.3)
+                # Sanity guard: limit_entry must be above current price (it's a sell bounce)
+                limit_entry = max(limit_entry, entry)
             else:
                 limit_entry = entry
 
+            # ── TPs: R:R-aware with minimum floor (SHORT mirror) ──────────
+            sl_dist_short = abs(sl - entry)
+            min_tp1_dist = sl_dist_short * 1.5  # Minimum 1:1.5 R:R
+
             supports = [s for s in ind.support_levels if s < entry]
-            tp1 = supports[0] if len(supports) > 0 else entry - atr * 2
-            tp2 = supports[1] if len(supports) > 1 else entry - atr * 4
-            tp3 = entry - abs(sl - entry) * 3
+
+            # TP1: nearest support, but enforce min R:R 1:1.5
+            if supports and (entry - supports[0]) >= min_tp1_dist:
+                tp1 = supports[0]
+            else:
+                tp1_atr = entry - atr * 2
+                tp1 = min(tp1_atr, entry - min_tp1_dist)
+
+            # TP2: next support or ATR*3, whichever is farther
+            tp2_from_level = supports[1] if len(supports) > 1 else entry - atr * 4
+            tp2_from_atr = entry - atr * 3
+            tp2 = min(tp2_from_level, tp2_from_atr)
+
+            # TP3: fixed 1:3 R:R
+            tp3 = entry - sl_dist_short * 3
+
+            # FVG-aware TP boost: bullish FVG below = price magnet
+            for fvg in ind.fvg_zones:
+                if fvg["type"] == "bullish" and fvg["bottom"] < tp1:
+                    tp2 = min(tp2, fvg["bottom"])
+                    break
+
+            # Minimum spacing: TP1 > TP2 > TP3 (monotonically decreasing for SHORT)
+            tp1_dist = entry - tp1
+            if entry - tp2 <= tp1_dist * 1.2:
+                tp2 = entry - tp1_dist * 2.0
+            # TP3 must always be beyond (below) TP2
+            tp3 = min(tp3, tp2 - tp1_dist)
 
             entry_type = "LIMIT" if abs(limit_entry - entry) > atr * 0.1 else "MARKET"
 
@@ -851,14 +967,24 @@ class TAService:
         rr1 = abs(tp1 - entry) / sl_dist if sl_dist > 0 else 0
         rr2 = abs(tp2 - entry) / sl_dist if sl_dist > 0 else 0
 
+        # Price-adaptive rounding: low-price coins need more decimals
+        if entry < 1:
+            dp = 6
+        elif entry < 10:
+            dp = 4
+        elif entry < 100:
+            dp = 3
+        else:
+            dp = 2
+
         return {
-            "entry": round(entry, 2),
-            "limit_entry": round(limit_entry, 2),
+            "entry": round(entry, dp),
+            "limit_entry": round(limit_entry, dp),
             "entry_type": entry_type,
-            "sl": round(sl, 2),
-            "tp1": round(tp1, 2),
-            "tp2": round(tp2, 2),
-            "tp3": round(tp3, 2),
+            "sl": round(sl, dp),
+            "tp1": round(tp1, dp),
+            "tp2": round(tp2, dp),
+            "tp3": round(tp3, dp),
             "sl_pct": round(sl_dist / entry * 100, 2),
             "tp1_pct": round(abs(tp1 - entry) / entry * 100, 2),
             "tp2_pct": round(abs(tp2 - entry) / entry * 100, 2),
