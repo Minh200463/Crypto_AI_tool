@@ -340,10 +340,6 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if oi_data and not isinstance(oi_data, Exception):
             ind.oi_change_pct = oi_data.get("oi_change_pct")
 
-        # Detect Spot vs Futures for display badge
-        mtype = await binance.detect_market_type(symbol)
-        mtype_badge = "⚡ FUTURES" if mtype == "futures" else ("📊 SPOT" if mtype == "spot" else "🔍 UNKNOWN")
-
         # ── MTF: 3-layer trend filter (1W → 1D → 4H) ─────────────────
         daily_trend  = ta_svc.get_daily_trend(candles_1d)  if not isinstance(candles_1d, Exception) and len(candles_1d)  >= 50 else "sideways"
         weekly_trend = ta_svc.get_weekly_trend(candles_1w) if not isinstance(candles_1w, Exception) and len(candles_1w) >= 50 else "sideways"
@@ -465,8 +461,8 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
         text = (
-            f"🎯 *Signal: {symbol} — 4H* `{mtype_badge}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎯 *Signal: {symbol} — 4H*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Lệnh: {emoji} | Chất lượng: {signal_grade}\n"
             f"Độ tin cậy: `{confidence_label}`\n"
             f"📅 1W: {weekly_icon}`{weekly_trend.upper()}` | 1D: `{daily_trend.upper()}`\n"

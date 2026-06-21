@@ -75,41 +75,6 @@ class BinanceClient:
         if self._cache:
             await self._cache.set(f"mtype:{symbol}", market_type, ttl_seconds=86400)
 
-    async def detect_market_type(self, symbol: str) -> str:
-        """
-        Actively detect whether a symbol is on Spot or Futures.
-        Returns: 'spot' | 'futures' | 'unknown'
-        Result is cached for 24h.
-        """
-        symbol = _normalize_symbol(symbol)
-
-        # Check cache first
-        if self._cache:
-            cached = await self._cache.get(f"mtype:{symbol}")
-            if cached in ("spot", "futures"):
-                return cached
-
-        # Try Spot first
-        try:
-            await self._get("/api/v3/ticker/price", {"symbol": symbol})
-            await self._cache_market_type(symbol, "spot")
-            return "spot"
-        except httpx.HTTPStatusError as e:
-            if e.response is not None and e.response.status_code == 400:
-                pass  # not on Spot — try Futures
-            else:
-                raise
-
-        # Try Futures
-        try:
-            await self._get("/fapi/v1/ticker/price", {"symbol": symbol}, use_futures=True)
-            await self._cache_market_type(symbol, "futures")
-            return "futures"
-        except Exception:
-            pass
-
-        return "unknown"
-
     async def get_ticker(self, symbol: str) -> dict:
         """
         Get current price and 24h stats for a coin.
