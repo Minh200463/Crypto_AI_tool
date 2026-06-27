@@ -364,6 +364,8 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elif short_score >= SCORE_THRESHOLD:
             side, score, reasons, emoji = "short", short_score, short_reasons, "🔴 SHORT"
         else:
+            mtype = await binance._get_market_type(symbol)
+            mtype_badge = "FUTURES" if mtype == "futures" else "SPOT"
             await msg.edit_text(
                 f"⚖️ *{symbol}* `{mtype_badge}` — Không có setup chất lượng cao\n"
                 f"Long: `{long_score}/10` | Short: `{short_score}/10`\n"
