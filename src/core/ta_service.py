@@ -270,10 +270,11 @@ class TAService:
         bb_lower = float(bb.bollinger_lband().iloc[-1])
 
         # ── Moving Averages ───────────────────────────────────────────────
-        # EMA20/50: faster reaction to recent price action (P6 — SMA→EMA migration)
+        # [FIX] MA20/MA50 reverted to SMA to match Binance chart default display.
+        # MA200 also SMA — all three now consistent with what users see on Binance. 
         # MA200 stays SMA: used for long-term trend baseline, not entry timing
-        ma20 = float(ta.trend.EMAIndicator(close=close, window=20).ema_indicator().iloc[-1])
-        ma50 = float(ta.trend.EMAIndicator(close=close, window=50).ema_indicator().iloc[-1])
+        ma20 = float(ta.trend.SMAIndicator(close=close, window=20).sma_indicator().iloc[-1])
+        ma50 = float(ta.trend.SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
         ma200 = float(ta.trend.SMAIndicator(close=close, window=200).sma_indicator().iloc[-1])
 
         # ── ATR ───────────────────────────────────────────────────────────
@@ -292,8 +293,8 @@ class TAService:
             adx_val = 0.0  # fallback if insufficient data
 
         # ── Volume ───────────────────────────────────────────────────────
-        avg_vol_20 = float(volume.iloc[-20:].mean())
-        current_vol = float(volume.iloc[-1])
+        avg_vol_20 = float(df["quote_volume"].iloc[-20:].mean())
+        current_vol = float(df["quote_volume"].iloc[-1])
 
         # ── Volume trend (last 3 vs prior 3 candles) ─────────────────────
         vol_last3 = float(volume.iloc[-4:-1].mean())
