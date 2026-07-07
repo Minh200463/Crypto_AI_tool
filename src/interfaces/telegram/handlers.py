@@ -232,7 +232,7 @@ async def analyze_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"⚡ *Momentum*\n"
             f"  RSI(14): `{ind.rsi:.1f}` — {ind.rsi_label}\n"
             f"  MACD: `{ind.macd_histogram:+.4f}` "
-            f"{'🔼 Bullish' if ind.macd_crossover == 'bullish' else '🔽 Bearish' if ind.macd_crossover == 'bearish' else '—'}\n\n"
+            f"{'🔼 Bullish crossover ✅' if ind.macd_crossover == 'bullish' else '🔽 Bearish crossover ✅' if ind.macd_crossover == 'bearish' else '↗️ Đang tăng' if ind.macd_histogram > 0 else '↘️ Đang giảm'}\n\n"
             f"📉 *Bollinger Bands*\n"
             f"  Upper: `${ind.bb_upper:,.2f}`\n"
             f"  Mid:   `${ind.bb_mid:,.2f}`\n"
@@ -287,7 +287,7 @@ async def analyze_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         try:
             # fast=False -> uses Primary Provider (Claude)
-            ai_response = await complete_with_fallback(prompt, max_tokens=300, fast=False)
+            ai_response = await complete_with_fallback(prompt, max_tokens=500, fast=False)
             final_text = text + f"\n\n🤖 *AI Nhận Định:*\n_{ai_response}_"
             final_text += DISCLAIMER
             await msg.edit_text(final_text, parse_mode="Markdown")
@@ -425,6 +425,7 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             tp_block = (
                 f"🎯 *TP1:* `${levels['tp1']:,.2f}` `(R:R 1:{levels['rr1']})`\n"
+                f"   → _Sau TP1: dời SL về `${levels['entry']:,.2f}` (breakeven) — risk\\-free_\n"
                 f"🎯 *TP2:* `${levels['tp2']:,.2f}` `(R:R 1:{levels['rr2']})`\n"
                 f"🎯 *TP3:* `${levels['tp3']:,.2f}` _(1:3 target)_\n"
             )
@@ -439,6 +440,8 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         regime_label = regime_labels.get(regime, f"ADX {ind.adx:.1f}")
 
         # ── Confidence label + Session filter (P3) ──────────────────────
+        # NOTE: score đã bao gồm penalty -1 từ ta_service khi low-liquidity.
+        # Derive label từ score thực tế, KHÔNG manually downgrade thêm (tránh double-penalty).
         session = ta_svc.get_current_session()
         if score >= 9:
             confidence_label = f"Rất cao ({score}/10)"
@@ -447,10 +450,10 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             confidence_label = f"Trung bình ({score}/10)"
 
-        # Low-liquidity session → downgrade confidence label + add warning
+        # Low-liquidity session → chỉ thêm warning text, KHÔNG đổi label riêng
+        # (score đã bị trừ -1 trong ta_service, label phản ánh score thật)
         session_warning = ""
         if not session["high_liquidity"]:
-            confidence_label = confidence_label.replace("Rất cao", "Cao").replace("Cao", "Trung bình")
             session_warning = (
                 f"\n⚠️ {session['emoji']} *{session['label']}* "
                 f"— thanh khoản thấp, tăng nguy cơ fakeout\n"
@@ -510,10 +513,10 @@ async def signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
         prompt = build_signal_context(ctx, score, 10, reasons, side, levels)
-        prompt += "\nReply in Vietnamese in 4-5 sentences."
+        # Language + length instruction is embedded in build_signal_context template.
 
         try:
-            ai_response = await complete_with_fallback(prompt, max_tokens=350, fast=False)
+            ai_response = await complete_with_fallback(prompt, max_tokens=600, fast=False)
             final_text = text + f"\n\n🤖 *AI Nhận Định:*\n_{ai_response}_" + DISCLAIMER
             await msg.edit_text(final_text, parse_mode="Markdown")
         except Exception as ai_err:

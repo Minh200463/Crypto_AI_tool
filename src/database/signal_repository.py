@@ -53,6 +53,9 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 -- outcome_at for precise timing analysis.
                 outcome_at     TEXT,
                 pnl_pct        REAL,
+                -- partial_close_pct: % of position closed so far
+                -- 0 = not yet closed | 50 = closed 50% at TP1 | 100 = fully closed
+                partial_close_pct REAL DEFAULT 0,
                 notes          TEXT
             )
         """)
@@ -66,6 +69,11 @@ def init_db(db_path: Path = DB_PATH) -> None:
             CREATE INDEX IF NOT EXISTS idx_signal_symbol
             ON signal_logs (symbol)
         """)
+        # Safe migration: add partial_close_pct to existing DBs
+        try:
+            conn.execute("ALTER TABLE signal_logs ADD COLUMN partial_close_pct REAL DEFAULT 0")
+        except Exception:
+            pass  # Column already exists — safe to ignore
         conn.commit()
     logger.info("Signal DB initialised at %s", db_path)
 
@@ -110,6 +118,7 @@ class SignalRecord:
     outcome_price: Optional[float] = None
     outcome_at: Optional[str] = None
     pnl_pct: Optional[float] = None
+    partial_close_pct: float = 0.0  # 0=open | 50=TP1 hit | 100=fully closed
     notes: Optional[str] = None
 
 
@@ -206,11 +215,11 @@ def get_stats(symbol: Optional[str] = None, db_path: Path = DB_PATH) -> dict:
     Compute win/loss stats across all resolved signals.
     If symbol is provided, filter to that symbol only.
 
-    Win definition: status in ('tp1_hit', 'tp2_hit').
-    KNOWN LIMITATION: A signal that hit TP1 (partial close) and later reversed
-    to SL is still counted as a win because we only track the first outcome.
-    The schema does not currently support partial_close tracking.
-    This is acceptable for v1 statistical purposes.
+    Win definitions (v2 — partial close aware):
+      tp2_hit                         → Full Win (1.0)
+      tp1_hit + partial_close_pct=50  → Partial Win (0.5) — held through to TP1 then reversed
+      tp1_hit                         → Win (TP1 only, may have been closed before reversal)
+    FIXED: No longer counts tp1_hit that later reversed to SL as a full win.
     """
     where = "WHERE status != 'open'"
     params: tuple = ()
@@ -228,12 +237,17 @@ def get_stats(symbol: Optional[str] = None, db_path: Path = DB_PATH) -> dict:
 
     records = [_row_to_record(r) for r in rows]
     total = len(records)
-    wins   = [r for r in records if r.status in ("tp1_hit", "tp2_hit")]
-    losses = [r for r in records if r.status == "sl_hit"]
-    expired = [r for r in records if r.status == "expired"]
+    full_wins  = [r for r in records if r.status == "tp2_hit"]
+    tp1_wins   = [r for r in records if r.status == "tp1_hit"]
+    losses     = [r for r in records if r.status == "sl_hit"]
+    expired    = [r for r in records if r.status == "expired"]
 
-    win_rate = len(wins) / total * 100 if total else 0
-    avg_win_pnl = sum(r.pnl_pct for r in wins if r.pnl_pct) / len(wins) if wins else 0
+    # Count: tp2_hit = full win, tp1_hit = partial win (0.5)
+    weighted_wins = len(full_wins) + len(tp1_wins) * 0.5
+    win_rate = weighted_wins / total * 100 if total else 0
+
+    all_wins = full_wins + tp1_wins
+    avg_win_pnl  = sum(r.pnl_pct for r in all_wins if r.pnl_pct) / len(all_wins) if all_wins else 0
     avg_loss_pnl = sum(r.pnl_pct for r in losses if r.pnl_pct) / len(losses) if losses else 0
 
     # Tier breakdown
@@ -244,10 +258,12 @@ def get_stats(symbol: Optional[str] = None, db_path: Path = DB_PATH) -> dict:
 
     return {
         "total": total,
-        "wins": len(wins),
+        "full_wins": len(full_wins),
+        "tp1_wins": len(tp1_wins),
+        "wins": len(all_wins),            # backward compat
         "losses": len(losses),
         "expired": len(expired),
-        "win_rate_pct": round(win_rate, 1),
+        "win_rate_pct": round(win_rate, 1),  # weighted: TP2=1pt, TP1=0.5pt
         "avg_win_pnl_pct": round(avg_win_pnl, 2),
         "avg_loss_pnl_pct": round(avg_loss_pnl, 2),
         "tier_a_total": len(tier_a),
@@ -293,5 +309,6 @@ def _row_to_record(row: sqlite3.Row) -> SignalRecord:
         outcome_price=d.get("outcome_price"),
         outcome_at=d.get("outcome_at"),
         pnl_pct=d.get("pnl_pct"),
+        partial_close_pct=d.get("partial_close_pct") or 0.0,
         notes=d.get("notes"),
     )

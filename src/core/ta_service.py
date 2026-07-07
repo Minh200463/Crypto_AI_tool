@@ -138,6 +138,23 @@ class IndicatorResult:
         return abs(c["close"] - c["open"]) / rng * 100
 
     @property
+    def is_doji(self) -> bool:
+        """
+        True nếu nến cuối cùng đã đóng là Doji.
+        Doji: body < 10% của toàn bộ range nến.
+        Biểu thị thị trường do dự, hai phấ cân bằng nhau.
+        Không vào lệnh khi doji tại vùng S/R quan trọng.
+        """
+        if len(self.last_candles) < 2:
+            return False
+        c = self.last_candles[-2]  # closed candle
+        rng = c["high"] - c["low"]
+        if rng == 0:
+            return False
+        body = abs(c["close"] - c["open"])
+        return (body / rng) < 0.10  # body nhỏ hơn 10% range = doji
+
+    @property
     def pin_bar_signal(self) -> str | None:
         """
         Detect Pin Bar (rejection candle) on the last CLOSED candle.
@@ -555,20 +572,45 @@ class TAService:
         # All checks use last_candles[-2] (closed candle — no lookahead bias)
         _pin = ind.pin_bar_signal
         _eng = ind.engulfing_signal
-        if _pin == "bullish":
-            score += 2
-            reasons.append("🔨 Bullish Pin Bar (hammer/rejection) — strong reversal signal")
-        elif _eng == "bullish":
-            score += 2
-            reasons.append("📈 Bullish Engulfing candle — momentum shift confirmed")
-        elif ind.last_candle_bullish and ind.candle_body_pct >= 50:
-            score += 1
-            reasons.append(f"Bullish candle, strong body ({ind.candle_body_pct:.0f}%)")
-        elif ind.last_candle_bullish:
-            score += 0  # weak body, no signal
-            reasons.append(f"Bullish candle, weak body ({ind.candle_body_pct:.0f}%) — no points")
-        elif _pin == "bearish" or _eng == "bearish":
-            reasons.append("⚠️ Bearish candle pattern — contradicts LONG setup")
+
+        # ── Doji warning tại vùng S/R quan trọng ────────────────────────────
+        # Doji tại resistance/MA200 = thị trường đang do dự = KHÔNG vào ngay
+        _doji_at_sr = False
+        if ind.is_doji:
+            _near_res = (
+                ind.nearest_resistance is not None and
+                abs(ind.nearest_resistance - ind.current_price) / ind.current_price < 0.01
+            )
+            _above_ma200_fresh = (
+                ind.current_price > ind.ma200 and
+                abs(ind.current_price - ind.ma200) / ind.current_price < 0.012
+            )
+            if _near_res or _above_ma200_fresh:
+                _doji_at_sr = True
+                _sr_label = (
+                    f"${ind.nearest_resistance:,.0f}" if _near_res
+                    else f"MA200 ${ind.ma200:,.0f}"
+                )
+                reasons.append(
+                    f"⚠️ Doji tại kháng cự {_sr_label} — thị trường đang do dự. "
+                    "Chờ nến xác nhận tiếp theo trước khi vào lệnh."
+                )
+
+        if not _doji_at_sr:
+            if _pin == "bullish":
+                score += 2
+                reasons.append("🔨 Bullish Pin Bar (hammer/rejection) — strong reversal signal")
+            elif _eng == "bullish":
+                score += 2
+                reasons.append("📈 Bullish Engulfing candle — momentum shift confirmed")
+            elif ind.last_candle_bullish and ind.candle_body_pct >= 50:
+                score += 1
+                reasons.append(f"Bullish candle, strong body ({ind.candle_body_pct:.0f}%)")
+            elif ind.last_candle_bullish:
+                score += 0  # weak body, no signal
+                reasons.append(f"Bullish candle, weak body ({ind.candle_body_pct:.0f}%) — no points")
+            elif _pin == "bearish" or _eng == "bearish":
+                reasons.append("⚠️ Bearish candle pattern — contradicts LONG setup")
 
         # ── 5. Swing Level & FVG Proximity (0–2 pts) ─────────────────────────
         ns = ind.nearest_support
@@ -593,6 +635,34 @@ class TAService:
             reasons.append(f"Bullish rising volume ({ind.volume_vs_avg:.1f}x avg)")
         elif ind.volume_trend == "rising" and not ind.last_candle_bullish:
             reasons.append(f"⚠️ Volume spike on bearish candle — sell pressure, not counted for LONG")
+
+        # ── Volume Breakout Confirmation (NEW — Task 1) ───────────────────────
+        # Breakout MA200 hoặc resistance quan trọng MUST có volume ≥ 0.8x avg.
+        _near_ma200_breakout = (
+            ind.current_price > ind.ma200 and
+            abs(ind.current_price - ind.ma200) / ind.current_price < 0.008  # trong 0.8% MA200
+        )
+        _near_resistance_breakout = (
+            ind.nearest_resistance is not None and
+            abs(ind.nearest_resistance - ind.current_price) / ind.current_price < 0.005  # trong 0.5%
+        )
+        if _near_ma200_breakout or _near_resistance_breakout:
+            _breakout_zone = (
+                f"MA200 ${ind.ma200:,.0f}" if _near_ma200_breakout
+                else f"${ind.nearest_resistance:,.0f}"
+            )
+            if ind.volume_vs_avg < 0.8:
+                score = max(0, score - 1)
+                reasons.append(
+                    f"⚠️ Breakout {_breakout_zone} với volume thấp ({ind.volume_vs_avg:.1f}x avg) "
+                    f"— breakout giả cao, cần xác nhận. Score -1"
+                )
+            elif ind.volume_vs_avg >= 1.5 and ind.last_candle_bullish:
+                score += 1
+                reasons.append(
+                    f"✅ Breakout {_breakout_zone} xác nhận bởi volume mạnh "
+                    f"({ind.volume_vs_avg:.1f}x avg) 🔥"
+                )
 
         # P4: Open Interest confirmation
         if ind.oi_change_pct is not None:

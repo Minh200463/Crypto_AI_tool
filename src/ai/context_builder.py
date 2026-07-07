@@ -133,7 +133,7 @@ def build_signal_context(
     side: str,
     levels: dict,
 ) -> str:
-    """Format data for /signal interpretation prompt — v2 with entry zone."""
+    """Format data for /signal interpretation prompt — v2 with entry zone + scenario planning."""
     signal_strength = "STRONG" if score >= 8 else "MODERATE" if score >= 6 else "WEAK"
 
     lines = [
@@ -152,14 +152,18 @@ def build_signal_context(
         "",
         build_analysis_context(ctx),
         "",
-        "As a professional risk manager, evaluate this trade setup in 4-5 sentences:",
-        "1. Is the entry zone well-positioned relative to key support/resistance?",
-        "2. Are there any conflicting signals that reduce confidence?",
-        "3. What is the key invalidation scenario for this trade?",
-        "4. Rate overall setup quality (Low/Medium/High) and justify.",
-        "Use precise, professional language. Avoid 'buy', 'sell', 'will', 'definitely', 'guaranteed'.",
+        "As a professional trader with 20+ years experience, provide a structured analysis:",
+        "1. SCENARIO XÁC NHẬN: Điều kiện cụ thể nào (price level + volume) để setup này được xác nhận?",
+        "   Ví dụ: 'Vào lệnh nếu giá đóng nến trên/dưới $X với volume > Y lần avg'",
+        "2. SCENARIO VÔ HIỆU: Level nào khiến setup này hoàn toàn mất giá trị?",
+        "   Ví dụ: 'Setup vô hiệu nếu giá phá $X'",
+        "3. ENTRY TỐI ƯU: Entry hiện tại có phải đang chase giá không? Gợi ý entry tốt hơn nếu cần pullback.",
+        "4. RỦI RO CHÍNH: Một câu về rủi ro lớn nhất của setup này ngay lúc này.",
+        "",
+        "Use precise price levels. Reply in Vietnamese. Keep under 6 sentences total.",
     ]
     return "\n".join(lines)
+
 
 
 def build_morning_brief_context(

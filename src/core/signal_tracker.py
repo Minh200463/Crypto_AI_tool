@@ -154,12 +154,13 @@ def format_stats_message(symbol: str | None = None) -> str:
             f"_Hãy dùng /signal để tạo signal đầu tiên!_"
         )
 
-    total = stats["total"]
-    wins = stats["wins"]
-    losses = stats["losses"]
-    expired = stats["expired"]
+    total    = stats["total"]
+    full_wins = stats.get("full_wins", 0)
+    tp1_wins  = stats.get("tp1_wins", 0)
+    losses   = stats["losses"]
+    expired  = stats["expired"]
     win_rate = stats["win_rate_pct"]
-    scope = f"*{symbol}*" if symbol else "toàn hệ thống"
+    scope    = f"*{symbol}*" if symbol else "toàn hệ thống"
 
     # Win rate emoji
     if win_rate >= 65:
@@ -174,8 +175,9 @@ def format_stats_message(symbol: str | None = None) -> str:
         f"────────────────────────────",
         f"",
         f"📈 Tổng signal: `{total}`",
-        f"✅ Thắng: `{wins}` | ❌ Thua: `{losses}` | ⌛ Hết hạn: `{expired}`",
-        f"{wr_emoji} Win rate: `{win_rate}%`",
+        f"✅ Hit TP2 (full win): `{full_wins}` | ✅ Hit TP1: `{tp1_wins}` | ❌ SL: `{losses}` | ⌛ Hết hạn: `{expired}`",
+        f"{wr_emoji} Win rate (weighted): `{win_rate}%`",
+        f"   _TP2=1pt, TP1=0.5pt — phản ánh đúng chất lượng lệnh_",
         f"",
         f"💰 Avg lãi/lệnh thắng: `+{stats['avg_win_pnl_pct']}%`",
         f"💸 Avg lỗ/lệnh thua:   `{stats['avg_loss_pnl_pct']}%`",
@@ -186,11 +188,11 @@ def format_stats_message(symbol: str | None = None) -> str:
         f"⭐⭐ Tier B (5d expire): `{stats['tier_b_wins']}/{stats['tier_b_total']}` thắng "
         f"({stats['tier_b_win_rate']}%)",
         f"",
-        f"_\u26a0\ufe0f Win = chạm TP1 hoặc TP2 (first outcome). "
-        f"Tham khảo /history để xem chi tiết._",
+        f"_Dùng /history để xem chi tiết từng lệnh._",
     ]
 
     return "\n".join(lines)
+
 
 
 def format_recent_signals_message(limit: int = 8) -> str:
