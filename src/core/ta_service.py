@@ -56,6 +56,10 @@ class IndicatorResult:
     oi_change_pct: float | None = None
     fvg_zones: list[dict] = field(default_factory=list)
 
+    # Break of Structure (BOS) — earlier trend confirmation than MA cross
+    # [NEW] 'bullish' | 'bearish' | None
+    bos_signal: str | None = None
+
     @property
     def rsi_label(self) -> str:
         if self.rsi >= 70:
@@ -361,7 +365,50 @@ class TAService:
             last_candles=last_candles,
             volume_trend=vol_trend,
             fvg_zones=self._detect_fvg(df),
+            bos_signal=self._detect_bos(df),  # [NEW] BOS detection
         )
+
+    def _detect_bos(self, df: pd.DataFrame, lookback: int = 20) -> str | None:
+        """
+        [NEW] Break of Structure (BOS) detection.
+
+        Identifies when price breaks a key structural level before MA cross
+        confirms it — gives trend signal 5-10 candles earlier than MA cross.
+
+        Bullish BOS:  current closed candle's HIGH > max of 3 recent swing highs
+        Bearish BOS:  current closed candle's LOW  < min of 3 recent swing lows
+
+        Uses closed candle [-2] to avoid lookahead bias.
+
+        Returns: 'bullish' | 'bearish' | None
+        """
+        if len(df) < lookback + 5:
+            return None
+
+        from scipy.signal import find_peaks
+
+        highs = df["high"].values[-lookback:]
+        lows  = df["low"].values[-lookback:]
+
+        # Find swing points in lookback window, excluding last 3 candles
+        peak_idx,   _ = find_peaks(highs[:-3],  distance=3)
+        trough_idx, _ = find_peaks(-lows[:-3], distance=3)
+
+        # Closed candle = [-2] to avoid lookahead bias
+        current_high = float(df["high"].iloc[-2])
+        current_low  = float(df["low"].iloc[-2])
+
+        if len(peak_idx) >= 3:
+            recent_swing_highs = highs[peak_idx[-3:]]
+            if current_high > float(max(recent_swing_highs)):
+                return "bullish"  # Price broke above 3 recent swing highs
+
+        if len(trough_idx) >= 3:
+            recent_swing_lows = lows[trough_idx[-3:]]
+            if current_low < float(min(recent_swing_lows)):
+                return "bearish"  # Price broke below 3 recent swing lows
+
+        return None
 
     def _detect_swing_levels(
         self, df: pd.DataFrame, lookback: int = 100
@@ -721,6 +768,13 @@ class TAService:
                 f"⚠️ {_session['emoji']} {_session['label']}: Low-liquidity session — score -1"
             )
 
+        # ── 10. BOS (Break of Structure) bonus (+1 pt) ──────────────────────
+        # [NEW] BOS gives earlier trend confirmation than MA cross (5-10 candles ahead).
+        # Only award bonus for bullish BOS on a LONG setup.
+        if ind.bos_signal == "bullish":
+            score += 1
+            reasons.append("📈 BOS xác nhận — phá vỡ swing high cấu trúc, trend mới hình thành 🎯")
+
         return score, reasons
 
     def score_short_setup(
@@ -876,6 +930,13 @@ class TAService:
             reasons.append(
                 f"⚠️ {_session['emoji']} {_session['label']}: Low-liquidity session — score -1"
             )
+
+        # ── 10. BOS (Break of Structure) bonus (+1 pt) ──────────────────────
+        # [NEW] BOS gives earlier trend confirmation than MA cross (5-10 candles ahead).
+        # Only award bonus for bearish BOS on a SHORT setup.
+        if ind.bos_signal == "bearish":
+            score += 1
+            reasons.append("📉 BOS xác nhận — phá vỡ swing low cấu trúc, downtrend mới hình thành 🎯")
 
         return score, reasons
 

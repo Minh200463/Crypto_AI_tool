@@ -1,11 +1,12 @@
 """
-Position Sizer — ATR/SL-based position sizing engine.
+Position Sizer — Risk-based position sizing engine.
 
-Formula (Risk-based sizing):
+Formula:
     risk_amount_usdt = equity × risk_pct / 100
     position_usdt    = risk_amount_usdt / (sl_pct / 100)
     quantity         = position_usdt / entry_price
-    effective_lev    = position_usdt / equity
+    capital_utilization = position_usdt / equity  # renamed from effective_leverage
+                                                   # (this is NOT real Futures leverage)
 
 Tier-aware:
   - Tier A (≥8 pts): use configured risk_pct as-is
@@ -13,7 +14,12 @@ Tier-aware:
 
 Safety caps:
   - position_usdt capped at 80% of equity (never over-expose)
-  - Warnings emitted if effective leverage > 5x or > 10x
+
+[FIX] Renamed effective_leverage → capital_utilization.
+  Rationale: This tool is a reference sizing calculator, not a Futures margin engine.
+  "effective_leverage" implied real borrowed leverage which confused users.
+  capital_utilization = how much of your equity you are deploying (1.0 = 100% deployed).
+  Removed >5x / >10x warnings — they were Futures-specific and misleading in Spot context.
 """
 from dataclasses import dataclass, field
 
@@ -33,7 +39,8 @@ class PositionSizeResult:
     risk_amount_usdt: float       # Max loss in USDT
     position_usdt: float          # Total position value in USDT
     quantity: float               # Number of coins/contracts
-    effective_leverage: float     # position_usdt / equity
+    # [FIX] renamed from effective_leverage — see module docstring
+    capital_utilization: float    # position_usdt / equity (e.g. 0.5 = 50% of equity deployed)
 
     warnings: list[str] = field(default_factory=list)
     capped: bool = False          # True if position was capped at 80% equity
@@ -50,11 +57,11 @@ def calculate_position_size(
     Calculate position size based on equity, risk tolerance, and SL distance.
 
     Args:
-        equity:     Total account equity in USDT
-        risk_pct:   Max % of equity to risk per trade (e.g. 1.0 for 1%)
+        equity:      Total account equity in USDT
+        risk_pct:    Max % of equity to risk per trade (e.g. 1.0 for 1%)
         entry_price: Coin/contract entry price
-        sl_pct:     Stop loss distance from entry in % (e.g. 2.5 for 2.5%)
-        tier:       Signal tier — 'A' (full risk) or 'B' (half risk)
+        sl_pct:      Stop loss distance from entry in % (e.g. 2.5 for 2.5%)
+        tier:        Signal tier — 'A' (full risk) or 'B' (half risk)
 
     Returns:
         PositionSizeResult with all calculated fields
@@ -78,17 +85,14 @@ def calculate_position_size(
         capped = True
 
     quantity = position_usdt / entry_price
-    effective_leverage = position_usdt / equity
+    # [FIX] capital_utilization replaces effective_leverage
+    capital_utilization = position_usdt / equity
 
     warnings: list[str] = []
     if tier == "B":
         warnings.append(f"ℹ️ Tier B: Risk% tự động giảm 50% ({raw_risk_pct}% → {effective_risk_pct}%)")
     if capped:
         warnings.append("⚠️ Vị thế đã bị giới hạn ở 80% vốn — SL quá rộng")
-    if effective_leverage > 10:
-        warnings.append("🚨 Đòn bẩy hiệu quả > 10x — rủi ro RẤT CAO")
-    elif effective_leverage > 5:
-        warnings.append("⚠️ Đòn bẩy hiệu quả > 5x — kiểm tra lại SL")
 
     return PositionSizeResult(
         equity=equity,
@@ -100,7 +104,7 @@ def calculate_position_size(
         risk_amount_usdt=round(risk_amount_usdt, 2),
         position_usdt=round(position_usdt, 2),
         quantity=round(quantity, 6),
-        effective_leverage=round(effective_leverage, 2),
+        capital_utilization=round(capital_utilization, 2),
         warnings=warnings,
         capped=capped,
     )
@@ -111,17 +115,16 @@ def format_position_block(ps: PositionSizeResult) -> str:
     Format a PositionSizeResult into a Telegram-ready multi-line string.
     Used directly in signal_handler output.
     """
-    lev_emoji = "🚨" if ps.effective_leverage > 10 else (
-                "⚠️" if ps.effective_leverage > 5 else "✅")
+    # [FIX] Show capital utilization % instead of misleading "leverage Xx"
+    util_pct = ps.capital_utilization * 100
 
     lines = [
         f"💼 *Position Size (tự động):*",
         f"   Vốn: `${ps.equity:,.0f}` | Rủi ro: `{ps.effective_risk_pct}%` "
         f"(`${ps.risk_amount_usdt:,.2f}` USDT)",
         f"   📊 Vào lệnh: `${ps.position_usdt:,.2f}` USDT "
-        f"_({ps.position_usdt / ps.equity * 100:.1f}% vốn)_",
+        f"_({util_pct:.1f}% vốn sử dụng)_",
         f"   🪙 Số lượng: `{ps.quantity:,.6f}` coins",
-        f"   {lev_emoji} Đòn bẩy hiệu quả: `~{ps.effective_leverage:.1f}x`",
     ]
     for w in ps.warnings:
         lines.append(f"   {w}")

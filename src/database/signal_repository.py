@@ -56,6 +56,9 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 -- partial_close_pct: % of position closed so far
                 -- 0 = not yet closed | 50 = closed 50% at TP1 | 100 = fully closed
                 partial_close_pct REAL DEFAULT 0,
+                -- market_type: which engine/market generated this signal
+                -- 'spot' | 'futures' | 'auto' (default — current hybrid engine)
+                market_type    TEXT    DEFAULT 'auto',
                 notes          TEXT
             )
         """)
@@ -72,6 +75,11 @@ def init_db(db_path: Path = DB_PATH) -> None:
         # Safe migration: add partial_close_pct to existing DBs
         try:
             conn.execute("ALTER TABLE signal_logs ADD COLUMN partial_close_pct REAL DEFAULT 0")
+        except Exception:
+            pass  # Column already exists — safe to ignore
+        # [NEW] market_type column — safe migration for existing DBs
+        try:
+            conn.execute("ALTER TABLE signal_logs ADD COLUMN market_type TEXT DEFAULT 'auto'")
         except Exception:
             pass  # Column already exists — safe to ignore
         conn.commit()
@@ -119,6 +127,9 @@ class SignalRecord:
     outcome_at: Optional[str] = None
     pnl_pct: Optional[float] = None
     partial_close_pct: float = 0.0  # 0=open | 50=TP1 hit | 100=fully closed
+    # [NEW] market_type: engine that generated this signal
+    # 'auto' = current hybrid | 'spot' = /spot cmd | 'futures' = /futures cmd
+    market_type: str = "auto"
     notes: Optional[str] = None
 
 
@@ -131,16 +142,16 @@ def log_signal(rec: SignalRecord, db_path: Path = DB_PATH) -> int:
             INSERT INTO signal_logs
                 (symbol, side, score, tier, daily_trend, market_regime, adx,
                  entry_price, limit_entry, sl, tp1, tp2, tp3,
-                 sl_pct, rr1, rr2, fired_at, status, notes)
+                 sl_pct, rr1, rr2, fired_at, status, market_type, notes)
             VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             rec.symbol, rec.side, rec.score, rec.tier,
             rec.daily_trend, rec.market_regime, rec.adx,
             rec.entry_price, rec.limit_entry,
             rec.sl, rec.tp1, rec.tp2, rec.tp3,
             rec.sl_pct, rec.rr1, rec.rr2,
-            rec.fired_at, rec.status, rec.notes,
+            rec.fired_at, rec.status, rec.market_type, rec.notes,
         ))
         row_id = cursor.lastrowid
     logger.info("Signal logged: id=%d %s %s score=%d", row_id, rec.symbol, rec.side.upper(), rec.score)
@@ -310,5 +321,6 @@ def _row_to_record(row: sqlite3.Row) -> SignalRecord:
         outcome_at=d.get("outcome_at"),
         pnl_pct=d.get("pnl_pct"),
         partial_close_pct=d.get("partial_close_pct") or 0.0,
+        market_type=d.get("market_type") or "auto",  # [NEW]
         notes=d.get("notes"),
     )

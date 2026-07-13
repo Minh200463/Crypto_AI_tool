@@ -282,7 +282,9 @@ async def analyze_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         prompt = build_analysis_context(ctx) + (
             "\n\nPlease provide a concise 3-4 sentence interpretation of this data. "
             "Focus on the most important signals and overall market structure. "
-            "Reply in Vietnamese."
+            "Reply in Vietnamese. "
+            # [FIX] Telegram shows ### literally — must use plain text
+            "Do NOT use markdown headers (###), bold (**), or bullet lists. Plain text only."
         )
 
         try:
@@ -903,7 +905,7 @@ async def setequity_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             f"   Rủi ro {cfg['risk_pct']}% = `${example_ps.risk_amount_usdt:,.2f}` USDT\n"
             f"   Vào lệnh: `${example_ps.position_usdt:,.2f}` USDT\n"
             f"   Số lượng: `{example_ps.quantity:.6f}` BTC\n"
-            f"   Đòn bẩy hiệu quả: `~{example_ps.effective_leverage:.1f}x`\n\n"
+            f"   Vốn sử dụng: `~{example_ps.capital_utilization * 100:.0f}%` tổng vốn\n\n"
             f"_Signal tiếp theo sẽ tính toán tự động theo vốn này._",
             parse_mode="Markdown"
         )

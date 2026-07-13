@@ -161,6 +161,9 @@ def build_signal_context(
         "4. RỦI RO CHÍNH: Một câu về rủi ro lớn nhất của setup này ngay lúc này.",
         "",
         "Use precise price levels. Reply in Vietnamese. Keep under 6 sentences total.",
+        # [FIX] Telegram does not render markdown headers — they appear as literal ###
+        "IMPORTANT: Do NOT use markdown headers (###, ##, #) or bold (**text**) or bullet lists.",
+        "Plain text only — use numbers (1. 2. 3.) for structure if needed.",
     ]
     return "\n".join(lines)
 
