@@ -244,6 +244,148 @@ async def job_morning_brief(bot_data: dict) -> None:
         logger.error("job_morning_brief error: %s", e)
 
 
+async def job_auto_scan_watchlist(bot_data: dict) -> None:
+    """
+    [NEW] Auto-scan Watchlist — runs every 4H.
+
+    For each user who has /autoscan enabled:
+      1. Fetch their watchlist symbols
+      2. Run scoring (same engine as /signal) for each symbol
+      3. If any symbol scores >= user's min_score threshold → send Telegram alert
+      4. Does NOT call AI (no token cost), does NOT log to signal_logs DB
+         — user still needs to type /signal <coin> to get full analysis + log
+
+    This converts the bot from reactive (user asks) to proactive (bot alerts).
+    """
+    from src.data.database import AsyncSessionLocal
+    from src.data.repositories.watchlist_repo import WatchlistRepository
+    from src.data.repositories.user_repo import UserRepository
+    from src.core.ta_service import TAService, SCORE_TIER_A
+    from src.database.settings_repository import get_all_autoscan_users
+    import asyncio
+
+    binance = bot_data.get("binance")
+    bot     = bot_data.get("bot_instance")
+    if not binance or not bot:
+        return
+
+    # Get all users who enabled autoscan
+    autoscan_users = get_all_autoscan_users()
+    if not autoscan_users:
+        return  # Nobody has autoscan on — skip entirely
+
+    logger.info("Auto-scan: checking %d users", len(autoscan_users))
+    ta_svc = TAService()
+
+    async with AsyncSessionLocal() as db:
+        watchlist_repo = WatchlistRepository(db)
+        user_repo      = UserRepository(db)
+
+        for user_cfg in autoscan_users:
+            user_id       = user_cfg["user_id"]
+            min_score     = user_cfg["autoscan_min_score"]
+
+            try:
+                # Get telegram_id from user table
+                user = await user_repo.get_by_telegram_id(user_id)
+                if not user:
+                    continue
+
+                # Get this user's watchlist symbols
+                symbols = await watchlist_repo.get_symbols(user.id)
+                if not symbols:
+                    continue
+
+                # Scan each symbol — use asyncio.gather for speed
+                async def _scan_one(symbol: str) -> dict | None:
+                    """Score one symbol, return result if above threshold."""
+                    try:
+                        coin = symbol.replace("USDT", "")
+                        # Fetch 4H, 1D, 1W candles in parallel
+                        candles_4h, candles_1d, candles_1w, oi_data = await asyncio.gather(
+                            binance.get_klines(coin, interval="4h", limit=200),
+                            binance.get_klines(coin, interval="1d", limit=60),
+                            binance.get_klines(coin, interval="1w", limit=52),
+                            binance.get_open_interest(coin),
+                            return_exceptions=True,
+                        )
+                        if isinstance(candles_4h, Exception) or len(candles_4h) < 50:
+                            return None
+
+                        ind = ta_svc.compute_indicators(symbol, "4h", candles_4h)
+                        if isinstance(oi_data, dict):
+                            ind.oi_change_pct = oi_data.get("oi_change_pct")
+
+                        daily_trend  = ta_svc.get_daily_trend(candles_1d) if not isinstance(candles_1d, Exception) else "UNKNOWN"
+                        weekly_trend = ta_svc.get_weekly_trend(candles_1w) if not isinstance(candles_1w, Exception) else "UNKNOWN"
+
+                        long_score,  long_reasons  = ta_svc.score_long_setup(ind, daily_trend, weekly_trend)
+                        short_score, short_reasons = ta_svc.score_short_setup(ind, daily_trend, weekly_trend)
+
+                        best_score = max(long_score, short_score)
+                        if best_score < min_score:
+                            return None  # Below user's threshold
+
+                        side        = "LONG" if long_score >= short_score else "SHORT"
+                        score       = long_score if side == "LONG" else short_score
+                        tier_label  = "⭐⭐⭐ Tier A" if score >= SCORE_TIER_A else "⭐⭐ Tier B"
+                        side_emoji  = "🟢" if side == "LONG" else "🔴"
+                        session     = ta_svc.get_current_session()
+
+                        return {
+                            "symbol":       symbol,
+                            "coin":         coin,
+                            "side":         side,
+                            "side_emoji":   side_emoji,
+                            "score":        score,
+                            "tier_label":   tier_label,
+                            "price":        ind.current_price,
+                            "daily_trend":  daily_trend,
+                            "weekly_trend": weekly_trend,
+                            "session":      session,
+                        }
+                    except Exception as e:
+                        logger.warning("Auto-scan error for %s: %s", symbol, e)
+                        return None
+
+                # Run all symbols in parallel for this user
+                results = await asyncio.gather(*[_scan_one(sym) for sym in symbols])
+                hits    = [r for r in results if r is not None]
+
+                if not hits:
+                    logger.debug("Auto-scan user %d: no signals above %d/10", user_id, min_score)
+                    continue
+
+                # Build and send alert message for each hit
+                for hit in hits:
+                    sess = hit["session"]
+                    msg = (
+                        f"🚨 *AUTO-SCAN ALERT*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{hit['side_emoji']} *{hit['coin']}* — {hit['tier_label']} `({hit['score']}/10)`\n"
+                        f"Lệnh: *{hit['side']}* | Giá: `${hit['price']:,.2f}`\n"
+                        f"📅 1W: `{hit['weekly_trend']}` | 1D: `{hit['daily_trend']}`\n"
+                        f"{sess['emoji']} Phiên: `{sess['label']}`\n\n"
+                        f"👉 Gõ `/signal {hit['coin']}` để xem phân tích đầy đủ\n"
+                        f"_Bot không ghi log cho đến khi bạn gõ /signal_"
+                    )
+                    try:
+                        await bot.send_message(
+                            chat_id=user.telegram_id,
+                            text=msg,
+                            parse_mode="Markdown",
+                        )
+                        logger.info(
+                            "Auto-scan alert sent: user=%d symbol=%s score=%d side=%s",
+                            user_id, hit["symbol"], hit["score"], hit["side"],
+                        )
+                    except Exception as tg_err:
+                        logger.warning("Failed to send auto-scan alert: %s", tg_err)
+
+            except Exception as e:
+                logger.error("Auto-scan failed for user %d: %s", user_id, e)
+
+
 def setup_scheduler(bot_data: dict) -> AsyncIOScheduler:
     """Configure and return the scheduler with all jobs."""
     scheduler = get_scheduler()
@@ -267,6 +409,19 @@ def setup_scheduler(bot_data: dict) -> AsyncIOScheduler:
         minutes=30,
         kwargs={"bot_data": bot_data},
         id="check_rsi_alerts",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Every 4H — Auto-scan watchlist for all users who enabled /autoscan
+    # [NEW] Proactive signal hunting: bot alerts user instead of user having to ask
+    scheduler.add_job(
+        job_auto_scan_watchlist,
+        trigger="interval",
+        hours=4,
+        kwargs={"bot_data": bot_data},
+        id="auto_scan_watchlist",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

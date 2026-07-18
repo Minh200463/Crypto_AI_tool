@@ -54,6 +54,9 @@ def setup_bot(cache, db_session_factory) -> Application | None:
         ("setequity",      handlers.setequity_handler),
         ("setrisk",        handlers.setrisk_handler),
         ("possize",        handlers.possize_handler),
+        # Auto-scan — proactive watchlist scanning
+        # [NEW] Bot alerts user when coin hits score threshold, every 4H
+        ("autoscan",       handlers.autoscan_handler),
     ]
 
     for cmd, handler in commands:

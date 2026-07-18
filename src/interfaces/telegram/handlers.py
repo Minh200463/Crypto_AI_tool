@@ -110,9 +110,18 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "`/alerts` — Xem alerts đang active\n"
         "`/clear BTC` — Xóa alerts của BTC\n"
         "`/clearall` — Xóa tất cả alerts\n\n"
-        "*🛠 Sắp ra mắt \\(Quản lý rủi ro\\)*\n"
-        "`/risk 1000 BTC 67000 63850` — Quản lý rủi ro\n"
-        "`/log BTC buy 67000 0\\.01` — Nhật ký lệnh"
+        "*🤖 Auto\\-scan*\n"
+        "`/autoscan` — Xem trạng thái auto\\-scan\n"
+        "`/autoscan on` — Bật alert khi score ≥ 7\n"
+        "`/autoscan on 8` — Chỉ alert Tier A mạnh ≥ 8\n"
+        "`/autoscan off` — Tắt\n\n"
+        "*💼 Position Sizing*\n"
+        "`/setequity 10000` — Đặt vốn tài khoản\n"
+        "`/setrisk 1` — Đặt risk % mỗi lệnh\n"
+        "`/possize 65000 63000` — Tính size thủ công\n\n"
+        "*📈 Thống kê*\n"
+        "`/stats` — Win rate & P&L tổng hợp\n"
+        "`/history` — 10 signal gần nhất"
     )
     await update.effective_message.reply_text(msg, parse_mode="MarkdownV2")
 
@@ -1033,3 +1042,112 @@ async def possize_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"❌ Dữ liệu không hợp lệ. Ví dụ đúng:\n`/possize 65000 63000`",
             parse_mode="Markdown"
         )
+
+
+# ─── /autoscan — Enable/disable automatic watchlist scanning ──────────────────
+
+async def autoscan_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    [NEW] /autoscan — Control automatic 4H watchlist scanning.
+
+    Bot will proactively scan your watchlist every 4H and alert you
+    when any coin scores above your threshold — no need to manually type /signal.
+
+    Usage:
+      /autoscan on       → enable, alert when score >= 7 (default)
+      /autoscan off      → disable
+      /autoscan on 8     → enable, only alert on score >= 8 (Tier A strong)
+      /autoscan          → show current status
+
+    How it works:
+      Every 4H the bot runs scoring (same as /signal) on ALL coins in your
+      watchlist. If any coin hits your threshold, you get an alert instantly.
+      The bot does NOT log to DB or call AI — it just notifies you.
+      You then type /signal <coin> to get the full analysis.
+    """
+    if not update.effective_message or not update.effective_user:
+        return
+
+    from src.database.settings_repository import (
+        get_user_settings, set_autoscan,
+        DEFAULT_AUTOSCAN_MIN_SCORE,
+    )
+
+    user_id = update.effective_user.id
+    args    = context.args or []
+
+    # ── No args → show current status ─────────────────────────────────────
+    if not args:
+        cfg = get_user_settings(user_id)
+        status_emoji = "✅ BẬT" if cfg["autoscan_enabled"] else "❌ TẮT"
+        await update.effective_message.reply_text(
+            f"🔍 *Auto-scan Watchlist*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Trạng thái: *{status_emoji}*\n"
+            f"Ngưỡng điểm: `{cfg['autoscan_min_score']}/10`\n\n"
+            f"*Cách dùng:*\n"
+            f"  `/autoscan on`    — bật, alert khi score ≥ 7\n"
+            f"  `/autoscan on 8`  — bật, chỉ alert Tier A mạnh (≥ 8)\n"
+            f"  `/autoscan off`   — tắt\n\n"
+            f"_Bot scan tất cả coin trong /watchlist mỗi 4H.\n"
+            f"Khi phát hiện cơ hội, bot nhắn bạn ngay — không cần mở app._",
+            parse_mode="Markdown",
+        )
+        return
+
+    action = args[0].lower()
+
+    # ── /autoscan off ──────────────────────────────────────────────────────
+    if action == "off":
+        set_autoscan(user_id, enabled=False)
+        await update.effective_message.reply_text(
+            "❌ *Auto-scan đã tắt.*\n"
+            "_Bot sẽ không tự động quét watchlist nữa.\n"
+            "Gõ `/autoscan on` để bật lại._",
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── /autoscan on [min_score] ───────────────────────────────────────────
+    if action == "on":
+        min_score = DEFAULT_AUTOSCAN_MIN_SCORE  # default 7
+        if len(args) >= 2:
+            try:
+                min_score = int(args[1])
+                if not (6 <= min_score <= 10):
+                    raise ValueError
+            except ValueError:
+                await update.effective_message.reply_text(
+                    "❌ Ngưỡng điểm phải từ 6–10. Ví dụ: `/autoscan on 7`",
+                    parse_mode="Markdown",
+                )
+                return
+
+        set_autoscan(user_id, enabled=True, min_score=min_score)
+
+        tier_note = ""
+        if min_score >= 8:
+            tier_note = " _(chỉ Tier A mạnh)_"
+        elif min_score == 7:
+            tier_note = " _(Tier A)_"
+        else:
+            tier_note = " _(Tier B+)_"
+
+        await update.effective_message.reply_text(
+            f"✅ *Auto-scan đã bật!*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Ngưỡng alert: `{min_score}/10`{tier_note}\n"
+            f"Tần suất: mỗi *4 giờ*\n"
+            f"Coin được scan: tất cả trong /watchlist\n\n"
+            f"_Bot sẽ tự nhắn khi phát hiện cơ hội — bạn không cần làm gì._\n"
+            f"_Gõ `/signal <coin>` sau khi nhận alert để xem phân tích đầy đủ._",
+            parse_mode="Markdown",
+        )
+        return
+
+    # ── Unknown action ─────────────────────────────────────────────────────
+    await update.effective_message.reply_text(
+        "❓ Cú pháp không hợp lệ.\n"
+        "Dùng: `/autoscan on` | `/autoscan off` | `/autoscan on 8`",
+        parse_mode="Markdown",
+    )
