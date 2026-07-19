@@ -4,8 +4,19 @@ Startup sequence: DB → Cache → Scheduler → Telegram Bot → run polling.
 """
 import asyncio
 import logging
+import threading
+import os
+import uvicorn
+from fastapi import FastAPI
 
 from config.settings import settings
+
+# Thêm vào main.py — giữ server không sleep
+health_app = FastAPI()
+
+@health_app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s — %(message)s",
@@ -40,14 +51,21 @@ async def main() -> None:
     scheduler.start()
     logger.info("Scheduler started.")
 
+    # Cấu hình uvicorn chạy chung event loop với bot thay vì dùng thread
+    port = int(os.environ.get("PORT", 8080))
+    config = uvicorn.Config(health_app, host="0.0.0.0", port=port, log_level="error")
+    server = uvicorn.Server(config)
+
     # 5. Run bot polling
-    logger.info("Bot is running. Press Ctrl+C to stop.")
+    logger.info("Bot and Health server are running. Press Ctrl+C to stop.")
     async with bot_app:
         await bot_app.start()
         await bot_app.updater.start_polling(drop_pending_updates=True)
 
         try:
-            await asyncio.Event().wait()
+            # Chạy web server thay vì dùng Event().wait()
+            logger.info("Health check server listening on port %s", port)
+            await server.serve()
         except (KeyboardInterrupt, SystemExit):
             pass
         finally:
