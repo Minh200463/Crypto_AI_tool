@@ -8,24 +8,18 @@ Schema: signal_logs table
   - Used for win-rate stats and backtesting
 """
 import logging
-import sqlite3
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
+
+from src.database.db_adapter import get_conn, adapt_sql
 
 logger = logging.getLogger(__name__)
 
-# DB file lives in project root / data directory
-DB_PATH = Path(__file__).parent.parent.parent / "data" / "signals.db"
-
-
-def init_db(db_path: Path = DB_PATH) -> None:
+def init_db() -> None:
     """Create DB and tables if they don't exist. Safe to call multiple times."""
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("""
+    with get_conn() as conn:
+        conn.execute(adapt_sql("""
             CREATE TABLE IF NOT EXISTS signal_logs (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol         TEXT    NOT NULL,
@@ -61,43 +55,31 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 market_type    TEXT    DEFAULT 'auto',
                 notes          TEXT
             )
-        """)
+        """))
         # Composite index for get_open_signals() — most frequent query
-        conn.execute("""
+        conn.execute(adapt_sql("""
             CREATE INDEX IF NOT EXISTS idx_signal_status
             ON signal_logs (status, symbol)
-        """)
+        """))
         # Separate index for symbol-only filter in get_stats(symbol=...)
-        conn.execute("""
+        conn.execute(adapt_sql("""
             CREATE INDEX IF NOT EXISTS idx_signal_symbol
             ON signal_logs (symbol)
-        """)
+        """))
         # Safe migration: add partial_close_pct to existing DBs
         try:
-            conn.execute("ALTER TABLE signal_logs ADD COLUMN partial_close_pct REAL DEFAULT 0")
+            conn.execute(adapt_sql("ALTER TABLE signal_logs ADD COLUMN partial_close_pct REAL DEFAULT 0"))
         except Exception:
             pass  # Column already exists — safe to ignore
         # [NEW] market_type column — safe migration for existing DBs
         try:
-            conn.execute("ALTER TABLE signal_logs ADD COLUMN market_type TEXT DEFAULT 'auto'")
+            conn.execute(adapt_sql("ALTER TABLE signal_logs ADD COLUMN market_type TEXT DEFAULT 'auto'"))
         except Exception:
             pass  # Column already exists — safe to ignore
-        conn.commit()
-    logger.info("Signal DB initialised at %s", db_path)
+    logger.info("Signal DB initialised")
 
 
-@contextmanager
-def _get_conn(db_path: Path = DB_PATH):
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+
 
 
 # ── Data class for a logged signal ───────────────────────────────────────────
@@ -135,17 +117,17 @@ class SignalRecord:
 
 # ── CRUD operations ───────────────────────────────────────────────────────────
 
-def log_signal(rec: SignalRecord, db_path: Path = DB_PATH) -> int:
+def log_signal(rec: SignalRecord) -> int:
     """Insert a new signal. Returns the new row ID."""
-    with _get_conn(db_path) as conn:
-        cursor = conn.execute("""
+    with get_conn() as conn:
+        cursor = conn.execute(adapt_sql("""
             INSERT INTO signal_logs
                 (symbol, side, score, tier, daily_trend, market_regime, adx,
                  entry_price, limit_entry, sl, tp1, tp2, tp3,
                  sl_pct, rr1, rr2, fired_at, status, market_type, notes)
             VALUES
                 (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
+        """), (
             rec.symbol, rec.side, rec.score, rec.tier,
             rec.daily_trend, rec.market_regime, rec.adx,
             rec.entry_price, rec.limit_entry,
@@ -158,11 +140,11 @@ def log_signal(rec: SignalRecord, db_path: Path = DB_PATH) -> int:
     return row_id
 
 
-def get_open_signals(db_path: Path = DB_PATH) -> list[SignalRecord]:
+def get_open_signals() -> list[SignalRecord]:
     """Return all signals with status='open'."""
-    with _get_conn(db_path) as conn:
+    with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM signal_logs WHERE status = 'open' ORDER BY fired_at ASC"
+            adapt_sql("SELECT * FROM signal_logs WHERE status = 'open' ORDER BY fired_at ASC")
         ).fetchall()
     return [_row_to_record(r) for r in rows]
 
@@ -172,16 +154,15 @@ def update_outcome(
     status: str,
     outcome_price: float,
     pnl_pct: float,
-    db_path: Path = DB_PATH,
 ) -> None:
     """Mark a signal as resolved with its outcome."""
     now = datetime.now(timezone.utc).isoformat()
-    with _get_conn(db_path) as conn:
-        conn.execute("""
+    with get_conn() as conn:
+        conn.execute(adapt_sql("""
             UPDATE signal_logs
             SET status=?, outcome_price=?, outcome_at=?, pnl_pct=?
             WHERE id=?
-        """, (status, outcome_price, now, pnl_pct, signal_id))
+        """), (status, outcome_price, now, pnl_pct, signal_id))
     logger.info("Signal #%d outcome updated: %s pnl=%.2f%%", signal_id, status, pnl_pct)
 
 
@@ -192,7 +173,7 @@ _TIER_EXPIRY_DAYS = {"A": 7, "B": 5}
 _DEFAULT_EXPIRY_DAYS = 5
 
 
-def expire_old_signals(db_path: Path = DB_PATH) -> int:
+def expire_old_signals() -> int:
     """
     Expire open signals that have exceeded their tier-based max age.
     Tier A: 7 days | Tier B: 5 days
@@ -204,13 +185,13 @@ def expire_old_signals(db_path: Path = DB_PATH) -> int:
 
     for tier, max_days in _TIER_EXPIRY_DAYS.items():
         cutoff = (now - timedelta(days=max_days)).isoformat()
-        with _get_conn(db_path) as conn:
-            cur = conn.execute("""
+        with get_conn() as conn:
+            cur = conn.execute(adapt_sql("""
                 UPDATE signal_logs
                 SET status='expired',
                     notes=('Auto-expired: no outcome within ' || ? || ' days (Tier ' || ? || ')')
                 WHERE status='open' AND tier=? AND fired_at < ?
-            """, (max_days, tier, tier, cutoff))
+            """), (max_days, tier, tier, cutoff))
             count = cur.rowcount
         if count:
             logger.info("Expired %d Tier %s signals (>%d days)", count, tier, max_days)
@@ -221,7 +202,7 @@ def expire_old_signals(db_path: Path = DB_PATH) -> int:
 
 # ── Stats queries ─────────────────────────────────────────────────────────────
 
-def get_stats(symbol: Optional[str] = None, db_path: Path = DB_PATH) -> dict:
+def get_stats(symbol: Optional[str] = None) -> dict:
     """
     Compute win/loss stats across all resolved signals.
     If symbol is provided, filter to that symbol only.
@@ -238,9 +219,9 @@ def get_stats(symbol: Optional[str] = None, db_path: Path = DB_PATH) -> dict:
         where += " AND symbol = ?"
         params = (symbol.upper(),)
 
-    with _get_conn(db_path) as conn:
+    with get_conn() as conn:
         rows = conn.execute(
-            f"SELECT * FROM signal_logs {where}", params
+            adapt_sql(f"SELECT * FROM signal_logs {where}"), params
         ).fetchall()
 
     if not rows:
@@ -286,16 +267,16 @@ def get_stats(symbol: Optional[str] = None, db_path: Path = DB_PATH) -> dict:
     }
 
 
-def get_recent_signals(limit: int = 10, db_path: Path = DB_PATH) -> list[SignalRecord]:
+def get_recent_signals(limit: int = 10) -> list[SignalRecord]:
     """Return the last N signals (any status) for display."""
-    with _get_conn(db_path) as conn:
+    with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM signal_logs ORDER BY fired_at DESC LIMIT ?", (limit,)
+            adapt_sql("SELECT * FROM signal_logs ORDER BY fired_at DESC LIMIT ?"), (limit,)
         ).fetchall()
     return [_row_to_record(r) for r in rows]
 
 
-def _row_to_record(row: sqlite3.Row) -> SignalRecord:
+def _row_to_record(row: dict) -> SignalRecord:
     d = dict(row)
     return SignalRecord(
         id=d["id"],
