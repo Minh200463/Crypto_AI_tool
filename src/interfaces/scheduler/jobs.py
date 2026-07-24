@@ -352,38 +352,30 @@ async def job_auto_scan_watchlist(bot_data: dict) -> None:
                 results = await asyncio.gather(*[_scan_one(sym) for sym in symbols])
                 hits    = [r for r in results if r is not None]
 
-                if not hits:
-                    logger.debug("Auto-scan user %d: no signals above %d/10", user_id, min_score)
-                    continue
+                # [NEW] Heartbeat — luôn gửi 1 tin nhắn ngắn để xác nhận job đã chạy,
+                # dù có hit hay không. Giúp user tự tin job 4H đang sống mà không cần
+                # soi log Render.
+                from datetime import datetime
+                now_str = datetime.now().strftime("%H:%M %d/%m")
 
-                # Build and send alert message for each hit
-                for hit in hits:
-                    sess = hit["session"]
-                    msg = (
-                        f"🚨 *AUTO-SCAN ALERT*\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"{hit['side_emoji']} *{hit['coin']}* — {hit['tier_label']} `({hit['score']}/10)`\n"
-                        f"Lệnh: *{hit['side']}* | Giá: `${hit['price']:,.2f}`\n"
-                        f"📅 1W: `{hit['weekly_trend']}` | 1D: `{hit['daily_trend']}`\n"
-                        f"{sess['emoji']} Phiên: `{sess['label']}`\n\n"
-                        f"👉 Gõ `/signal {hit['coin']}` để xem phân tích đầy đủ\n"
-                        f"_Bot không ghi log cho đến khi bạn gõ /signal_"
+                if not hits:
+                    logger.info(
+                        "Auto-scan user %d: scanned %d symbols, no signals above %d/10",
+                        user_id, len(symbols), min_score,
                     )
                     try:
                         await bot.send_message(
                             chat_id=user.telegram_id,
-                            text=msg,
+                            text=(
+                                f"🔍 _Auto-scan đã chạy lúc {now_str}_\n"
+                                f"Đã quét `{len(symbols)}` coin trong watchlist — "
+                                f"không có setup nào đạt `{min_score}/10`."
+                            ),
                             parse_mode="Markdown",
                         )
-                        logger.info(
-                            "Auto-scan alert sent: user=%d symbol=%s score=%d side=%s",
-                            user_id, hit["symbol"], hit["score"], hit["side"],
-                        )
                     except Exception as tg_err:
-                        logger.warning("Failed to send auto-scan alert: %s", tg_err)
-
-            except Exception as e:
-                logger.error("Auto-scan failed for user %d: %s", user_id, e)
+                        logger.warning("Failed to send auto-scan heartbeat: %s", tg_err)
+                    continue
 
 
 def setup_scheduler(bot_data: dict) -> AsyncIOScheduler:
