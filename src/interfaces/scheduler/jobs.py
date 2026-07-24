@@ -377,6 +377,27 @@ async def job_auto_scan_watchlist(bot_data: dict) -> None:
                         logger.warning("Failed to send auto-scan heartbeat: %s", tg_err)
                     continue
 
+                # Notify user for each hit found
+                for hit in hits:
+                    try:
+                        await bot.send_message(
+                            chat_id=user.telegram_id,
+                            text=(
+                                f"🚨 *Auto-scan Alert!*\n"
+                                f"{hit['side_emoji']} *{hit['coin']}* {hit['side']} "
+                                f"— Score: `{hit['score']}/10` {hit['tier_label']}\n"
+                                f"Giá: `${hit['price']:,.2f}`\n"
+                                f"📅 1D: `{hit['daily_trend'].upper()}` | 1W: `{hit['weekly_trend'].upper()}`\n\n"
+                                f"_Gõ `/signal {hit['coin']}` để xem phân tích đầy đủ._"
+                            ),
+                            parse_mode="Markdown",
+                        )
+                    except Exception as tg_err:
+                        logger.warning("Failed to send auto-scan alert: %s", tg_err)
+
+            except Exception as e:
+                logger.warning("Auto-scan failed for user %d: %s", user_id, e)
+
 
 def setup_scheduler(bot_data: dict) -> AsyncIOScheduler:
     """Configure and return the scheduler with all jobs."""
