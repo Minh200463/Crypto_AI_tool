@@ -26,7 +26,7 @@ def init_settings_table() -> None:
     with get_conn() as conn:
         conn.execute(adapt_sql("""
             CREATE TABLE IF NOT EXISTS user_settings (
-                user_id              INTEGER PRIMARY KEY,
+                user_id              BIGINT  PRIMARY KEY,
                 equity               REAL    NOT NULL DEFAULT 1000.0,
                 risk_pct             REAL    NOT NULL DEFAULT 1.0,
                 autoscan_enabled     INTEGER NOT NULL DEFAULT 0,
@@ -46,6 +46,17 @@ def init_settings_table() -> None:
                 ))
         except Exception:
             pass  # Column already exists — safe to ignore
+
+    # [FIX] Nâng cấp user_id từ INTEGER → BIGINT cho các DB Postgres cũ đã tạo
+    # bảng trước khi fix này (Telegram user_id có thể vượt quá 2,147,483,647).
+    try:
+        with get_conn() as conn:
+            conn.execute(adapt_sql(
+                "ALTER TABLE user_settings ALTER COLUMN user_id TYPE BIGINT"
+            ))
+    except Exception:
+        pass  # Đã là BIGINT hoặc SQLite (không cần ALTER kiểu này) — bỏ qua
+
     logger.debug("user_settings table ready")
 
 
