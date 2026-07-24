@@ -62,6 +62,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             username=tg_user.username,
             first_name=tg_user.first_name,
         )
+        await db.commit()
 
     name = tg_user.first_name or "Trader"
     if created:
@@ -614,6 +615,7 @@ async def watch_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             sym = _normalize_symbol(arg)
             _, created = await wl_repo.add(user.id, sym)
             (added if created else already).append(sym.replace("USDT", ""))
+        await db.commit()
 
     parts = []
     if added:
@@ -642,6 +644,7 @@ async def unwatch_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             sym = _normalize_symbol(arg)
             ok = await wl_repo.remove(user.id, sym)
             (removed if ok else not_found).append(sym.replace("USDT", ""))
+        await db.commit()
 
     parts = []
     if removed:
@@ -698,6 +701,7 @@ async def setalert_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             threshold=threshold,
             direction=direction,
         )
+        await db.commit()
 
     await update.effective_message.reply_text(
         f"🔔 Alert đã đặt!\n"
@@ -748,6 +752,7 @@ async def clear_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         from src.core.alert_service import AlertService
         user, _ = await UserRepository(db).upsert_user(update.effective_user.id)
         count = await AlertService(db).deactivate_all_for_symbol(user.id, symbol)
+        await db.commit()
 
     sym = symbol.replace("USDT", "")
     if count:
@@ -766,6 +771,7 @@ async def clearall_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         from src.core.alert_service import AlertService
         user, _ = await UserRepository(db).upsert_user(update.effective_user.id)
         count = await AlertService(db).deactivate_all(user.id)
+        await db.commit()
 
     if count:
         await update.effective_message.reply_text(f"✅ Đã xóa *{count}* alerts.", parse_mode="Markdown")
