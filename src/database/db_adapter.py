@@ -73,6 +73,7 @@ def get_conn():
         import psycopg2
         import psycopg2.extras
         conn = psycopg2.connect(_SYNC_URL)
+        conn.autocommit = True
         conn.cursor_factory = psycopg2.extras.RealDictCursor  # row["col"] syntax
         
         class PostgresConnectionWrapper:

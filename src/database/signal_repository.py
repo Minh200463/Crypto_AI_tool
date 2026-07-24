@@ -23,9 +23,9 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS signal_logs (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol         TEXT    NOT NULL,
-                side           TEXT    NOT NULL,      -- 'long' | 'short'
+                side           TEXT    NOT NULL,
                 score          INTEGER NOT NULL,
-                tier           TEXT    NOT NULL,      -- 'A' | 'B'
+                tier           TEXT    NOT NULL,
                 daily_trend    TEXT,
                 market_regime  TEXT,
                 adx            REAL,
@@ -38,44 +38,40 @@ def init_db() -> None:
                 sl_pct         REAL,
                 rr1            REAL,
                 rr2            REAL,
-                fired_at       TEXT    NOT NULL,      -- ISO-8601 UTC
-                status         TEXT    DEFAULT 'open',-- 'open'|'tp1_hit'|'tp2_hit'|'sl_hit'|'expired'
+                fired_at       TEXT    NOT NULL,
+                status         TEXT    DEFAULT 'open',
                 outcome_price  REAL,
-                -- NOTE: outcome_at is the time the 4H polling job detected the outcome,
-                -- NOT the exact candle time when TP/SL was actually hit.
-                -- For statistical backtesting this is acceptable, but do not use
-                -- outcome_at for precise timing analysis.
                 outcome_at     TEXT,
                 pnl_pct        REAL,
-                -- partial_close_pct: % of position closed so far
-                -- 0 = not yet closed | 50 = closed 50% at TP1 | 100 = fully closed
                 partial_close_pct REAL DEFAULT 0,
-                -- market_type: which engine/market generated this signal
-                -- 'spot' | 'futures' | 'auto' (default — current hybrid engine)
                 market_type    TEXT    DEFAULT 'auto',
                 notes          TEXT
             )
         """))
-        # Composite index for get_open_signals() — most frequent query
+
+    with get_conn() as conn:
         conn.execute(adapt_sql("""
             CREATE INDEX IF NOT EXISTS idx_signal_status
             ON signal_logs (status, symbol)
         """))
-        # Separate index for symbol-only filter in get_stats(symbol=...)
+
+    with get_conn() as conn:
         conn.execute(adapt_sql("""
             CREATE INDEX IF NOT EXISTS idx_signal_symbol
             ON signal_logs (symbol)
         """))
-        # Safe migration: add partial_close_pct to existing DBs
+
+    # [FIX] Mỗi ALTER TABLE trong connection/transaction riêng (xem giải thích ở settings_repository.py)
+    for stmt in [
+        "ALTER TABLE signal_logs ADD COLUMN partial_close_pct REAL DEFAULT 0",
+        "ALTER TABLE signal_logs ADD COLUMN market_type TEXT DEFAULT 'auto'",
+    ]:
         try:
-            conn.execute(adapt_sql("ALTER TABLE signal_logs ADD COLUMN partial_close_pct REAL DEFAULT 0"))
+            with get_conn() as conn:
+                conn.execute(adapt_sql(stmt))
         except Exception:
             pass  # Column already exists — safe to ignore
-        # [NEW] market_type column — safe migration for existing DBs
-        try:
-            conn.execute(adapt_sql("ALTER TABLE signal_logs ADD COLUMN market_type TEXT DEFAULT 'auto'"))
-        except Exception:
-            pass  # Column already exists — safe to ignore
+
     logger.info("Signal DB initialised")
 
 

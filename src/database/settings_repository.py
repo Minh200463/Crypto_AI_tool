@@ -34,17 +34,18 @@ def init_settings_table() -> None:
                 updated_at           TEXT
             )
         """))
-        # [NEW] Safe migration for existing DBs without autoscan columns
-        for col, defval in [
-            ("autoscan_enabled",   "0"),
-            ("autoscan_min_score", "7"),
-        ]:
-            try:
+
+    for col, defval in [
+        ("autoscan_enabled",   "0"),
+        ("autoscan_min_score", "7"),
+    ]:
+        try:
+            with get_conn() as conn:
                 conn.execute(adapt_sql(
                     f"ALTER TABLE user_settings ADD COLUMN {col} INTEGER NOT NULL DEFAULT {defval}"
                 ))
-            except Exception:
-                pass  # Column already exists — safe to ignore
+        except Exception:
+            pass  # Column already exists — safe to ignore
     logger.debug("user_settings table ready")
 
 
