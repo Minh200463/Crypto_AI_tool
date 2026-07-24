@@ -233,7 +233,7 @@ async def analyze_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text = (
             f"📊 *{ind.symbol} — {timeframe.upper()} Analysis*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"💰 Price: `${ind.current_price:,.2f}` | 24h: `{ticker['change_pct']:+.2f}%`\n\n"
+            f"💰 Price: `${ticker['price']:,.2f}` | 24h: `{ticker['change_pct']:+.2f}%`\n\n"
             f"📈 *Trend*\n"
             f"  MA20:  `${ind.ma20:,.2f}` {'✅' if ind.current_price > ind.ma20 else '❌'}\n"
             f"  MA50:  `${ind.ma50:,.2f}` {'✅' if ind.current_price > ind.ma50 else '❌'}\n"
