@@ -223,7 +223,9 @@ async def job_morning_brief(bot_data: dict) -> None:
                         logger.error("AI morning brief failed: %s", ai_err)
                         ai_text = "Lỗi tạo bản tin sáng từ AI."
 
-                    header = f"🌅 *Bản Tin Sáng — {datetime.now().strftime('%d/%m/%Y')}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    from datetime import datetime
+                    from zoneinfo import ZoneInfo
+                    header = f"🌅 *Bản Tin Sáng — {datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).strftime('%d/%m/%Y')}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     
                     # MarkdownV2 requires escaping some chars if the AI didn't do it perfectly,
                     # but we trust the AI to format mostly correctly. If it fails, fallback to Markdown.
@@ -356,7 +358,8 @@ async def job_auto_scan_watchlist(bot_data: dict) -> None:
                 # dù có hit hay không. Giúp user tự tin job 4H đang sống mà không cần
                 # soi log Render.
                 from datetime import datetime
-                now_str = datetime.now().strftime("%H:%M %d/%m")
+                from zoneinfo import ZoneInfo
+                now_str = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%H:%M %d/%m")
 
                 if not hits:
                     logger.info(
@@ -378,7 +381,44 @@ async def job_auto_scan_watchlist(bot_data: dict) -> None:
                     continue
 
                 # Notify user for each hit found
+                mode = user_cfg["autoscan_mode"]
                 for hit in hits:
+                    if mode == "full":
+                        # Full-auto: tự chạy AI + tự log DB, không cần
+                        # user gõ /signal thủ công — giải quyết trường hợp
+                        # user bận không kịp phản hồi khi có alert.
+                        try:
+                            from src.core.signal_engine import generate_full_signal, NoSignalResult
+                            result = await generate_full_signal(hit["symbol"], user_id, binance)
+                            if isinstance(result, NoSignalResult):
+                                # Hiếm khi xảy ra (đã qua threshold ở _scan_one),
+                                # nhưng phòng trường hợp dữ liệu đổi giữa 2 lần fetch.
+                                continue
+                            await bot.send_message(
+                                chat_id=user.telegram_id,
+                                text="🤖 *Auto-scan [FULL AUTO]* — đã tự phân tích & lưu journal:\n\n" + result,
+                                parse_mode="Markdown",
+                            )
+                        except Exception as full_err:
+                            logger.warning("Auto-scan full mode failed for %s: %s", hit["symbol"], full_err)
+                            # Fallback về alert nhẹ nếu full mode lỗi (VD: AI down)
+                            try:
+                                await bot.send_message(
+                                    chat_id=user.telegram_id,
+                                    text=(
+                                        f"🚨 *Auto-scan Alert!* _(full-auto lỗi, hiện alert thường)_\n"
+                                        f"{hit['side_emoji']} *{hit['coin']}* {hit['side']} "
+                                        f"— Score: `{hit['score']}/10` {hit['tier_label']}\n"
+                                        f"Giá: `${hit['price']:,.2f}`\n\n"
+                                        f"_Gõ `/signal {hit['coin']}` để xem phân tích đầy đủ._"
+                                    ),
+                                    parse_mode="Markdown",
+                                )
+                            except Exception as tg_err:
+                                logger.warning("Failed to send auto-scan fallback alert: %s", tg_err)
+                        continue
+
+                    # mode == "alert" (mặc định) — hành vi cũ, không tốn AI
                     try:
                         await bot.send_message(
                             chat_id=user.telegram_id,
@@ -427,12 +467,19 @@ def setup_scheduler(bot_data: dict) -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # Every 4H — Auto-scan watchlist for all users who enabled /autoscan
-    # [NEW] Proactive signal hunting: bot alerts user instead of user having to ask
+    # Auto-scan watchlist — chạy đúng tại các mốc chuyển session (đồng bộ với
+    # get_current_session() trong ta_service.py), thay vì interval trôi theo
+    # giờ start server (bug cũ: heartbeat lệch giờ mỗi lần Render restart).
+    # Overlap 20:00-24:00 VN quét thêm 1 lần giữa khung (22:00) vì đây là
+    # session thanh khoản cao nhất, biến động mạnh nhất trong ngày.
+    #   00:00 - đầu NY close             08:00 - đầu Asia (thấp)
+    #   04:00 - đầu off-hours (thấp)     14:00 - đầu London
+    #   20:00 - đầu Overlap (cao nhất)   22:00 - giữa Overlap
     scheduler.add_job(
         job_auto_scan_watchlist,
-        trigger="interval",
-        hours=4,
+        trigger="cron",
+        hour="0,4,8,14,20,22",
+        minute=0,
         kwargs={"bot_data": bot_data},
         id="auto_scan_watchlist",
         replace_existing=True,

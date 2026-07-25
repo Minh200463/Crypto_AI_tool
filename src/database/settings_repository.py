@@ -31,6 +31,7 @@ def init_settings_table() -> None:
                 risk_pct             REAL    NOT NULL DEFAULT 1.0,
                 autoscan_enabled     INTEGER NOT NULL DEFAULT 0,
                 autoscan_min_score   INTEGER NOT NULL DEFAULT 7,
+                autoscan_mode        TEXT    NOT NULL DEFAULT 'alert',
                 updated_at           TEXT
             )
         """))
@@ -38,11 +39,14 @@ def init_settings_table() -> None:
     for col, defval in [
         ("autoscan_enabled",   "0"),
         ("autoscan_min_score", "7"),
+        ("autoscan_mode",      "'alert'"),
     ]:
         try:
             with get_conn() as conn:
                 conn.execute(adapt_sql(
-                    f"ALTER TABLE user_settings ADD COLUMN {col} INTEGER NOT NULL DEFAULT {defval}"
+                    f"ALTER TABLE user_settings ADD COLUMN {col} "
+                    + ("TEXT" if col == "autoscan_mode" else "INTEGER")
+                    + f" NOT NULL DEFAULT {defval}"
                 ))
         except Exception:
             pass  # Column already exists — safe to ignore
@@ -64,62 +68,69 @@ def init_settings_table() -> None:
 
 
 def get_user_settings(user_id: int) -> dict:
-    """Return all settings for a user. Falls back to defaults."""
     with get_conn() as conn:
         row = conn.execute(
-            adapt_sql("SELECT equity, risk_pct, autoscan_enabled, autoscan_min_score FROM user_settings WHERE user_id = ?"),
+            adapt_sql(
+                "SELECT equity, risk_pct, autoscan_enabled, autoscan_min_score, autoscan_mode "
+                "FROM user_settings WHERE user_id = ?"
+            ),
             (user_id,)
         ).fetchone()
     if row:
         return {
             "equity":             row["equity"],
             "risk_pct":           row["risk_pct"],
-            # [NEW] autoscan fields
             "autoscan_enabled":   bool(row["autoscan_enabled"]),
             "autoscan_min_score": int(row["autoscan_min_score"]),
+            "autoscan_mode":      row["autoscan_mode"] or "alert",
         }
     return {
         "equity":             DEFAULT_EQUITY,
         "risk_pct":           DEFAULT_RISK_PCT,
         "autoscan_enabled":   bool(DEFAULT_AUTOSCAN_ENABLED),
         "autoscan_min_score": DEFAULT_AUTOSCAN_MIN_SCORE,
+        "autoscan_mode":      "alert",
     }
 
 
 def get_all_autoscan_users() -> list[dict]:
-    """
-    [NEW] Return all users who have autoscan enabled.
-    Used by the 4H auto-scan cron job to know who to notify.
-    Returns list of {user_id, autoscan_min_score}.
-    """
     with get_conn() as conn:
         rows = conn.execute(
-            adapt_sql("SELECT user_id, autoscan_min_score FROM user_settings WHERE autoscan_enabled = 1")
+            adapt_sql(
+                "SELECT user_id, autoscan_min_score, autoscan_mode "
+                "FROM user_settings WHERE autoscan_enabled = 1"
+            )
         ).fetchall()
-    return [{"user_id": row["user_id"], "autoscan_min_score": row["autoscan_min_score"]} for row in rows]
+    return [
+        {
+            "user_id": row["user_id"],
+            "autoscan_min_score": row["autoscan_min_score"],
+            "autoscan_mode": row["autoscan_mode"] or "alert",
+        }
+        for row in rows
+    ]
 
 
 def set_autoscan(
     user_id: int,
     enabled: bool,
     min_score: int = DEFAULT_AUTOSCAN_MIN_SCORE,
+    mode: str = "alert",
 ) -> None:
-    """
-    [NEW] Enable or disable auto-scan for a user, and set minimum score threshold.
-    min_score: 6 = Tier B+, 7 = Tier A minimum (default), 8 = strong Tier A only
-    """
+    """mode: 'alert' (chỉ báo điểm, không tốn AI) | 'full' (auto AI + log DB)."""
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     with get_conn() as conn:
         conn.execute(adapt_sql("""
-            INSERT INTO user_settings (user_id, equity, risk_pct, autoscan_enabled, autoscan_min_score, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO user_settings (user_id, equity, risk_pct, autoscan_enabled, autoscan_min_score, autoscan_mode, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 autoscan_enabled   = excluded.autoscan_enabled,
                 autoscan_min_score = excluded.autoscan_min_score,
+                autoscan_mode      = excluded.autoscan_mode,
                 updated_at         = excluded.updated_at
-        """), (user_id, DEFAULT_EQUITY, DEFAULT_RISK_PCT, int(enabled), min_score, now))
-    logger.info("User %d autoscan=%s min_score=%d", user_id, enabled, min_score)
+        """), (user_id, DEFAULT_EQUITY, DEFAULT_RISK_PCT, int(enabled), min_score, mode, now))
+    logger.info("User %d autoscan=%s min_score=%d mode=%s", user_id, enabled, min_score, mode)
 
 
 def set_equity(user_id: int, equity: float) -> None:
