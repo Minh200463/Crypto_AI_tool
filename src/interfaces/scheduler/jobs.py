@@ -218,7 +218,7 @@ async def job_morning_brief(bot_data: dict) -> None:
                     
                     try:
                         # fast=True -> uses Fast Provider (DeepSeek)
-                        ai_text = await complete_with_fallback(prompt, max_tokens=500, fast=True)
+                        ai_text = await complete_with_fallback(prompt, max_tokens=500, fast=False)
                     except Exception as ai_err:
                         logger.error("AI morning brief failed: %s", ai_err)
                         ai_text = "Lỗi tạo bản tin sáng từ AI."
