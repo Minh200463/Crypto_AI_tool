@@ -683,32 +683,27 @@ class TAService:
         elif ind.volume_trend == "rising" and not ind.last_candle_bullish:
             reasons.append(f"⚠️ Volume spike on bearish candle — sell pressure, not counted for LONG")
 
-        # ── Volume Breakout Confirmation (NEW — Task 1) ───────────────────────
-        # Breakout MA200 hoặc resistance quan trọng MUST có volume ≥ 0.8x avg.
-        _near_ma200_breakout = (
-            ind.current_price > ind.ma200 and
-            abs(ind.current_price - ind.ma200) / ind.current_price < 0.008  # trong 0.8% MA200
-        )
-        _near_resistance_breakout = (
-            ind.nearest_resistance is not None and
-            abs(ind.nearest_resistance - ind.current_price) / ind.current_price < 0.005  # trong 0.5%
-        )
-        if _near_ma200_breakout or _near_resistance_breakout:
-            _breakout_zone = (
-                f"MA200 ${ind.ma200:,.0f}" if _near_ma200_breakout
-                else f"${ind.nearest_resistance:,.0f}"
-            )
-            if ind.volume_vs_avg < 0.8:
-                score = max(0, score - 1)
-                reasons.append(
-                    f"⚠️ Breakout {_breakout_zone} với volume thấp ({ind.volume_vs_avg:.1f}x avg) "
-                    f"— breakout giả cao, cần xác nhận. Score -1"
-                )
-            elif ind.volume_vs_avg >= 1.5 and ind.last_candle_bullish:
+        # ── 6b. Volume Breakout Confirmation (0 / -1 / +1 pt) ───────────────
+        # [NEW] Breakout quality filter — price near key S/R needs volume to confirm.
+        # A breakout on low volume is the #1 cause of false signals (fake breakouts).
+        #
+        # Rule:
+        #   Price near MA200 (within 1%) → check if volume confirms:
+        #     volume_vs_avg >= 1.5  → real breakout → +1 bonus
+        #     volume_vs_avg <  0.8  → fake breakout → -1 penalty + warning
+        #   Price NOT near MA200 → no adjustment (rule only applies to key level breaks)
+        near_ma200 = abs(ind.current_price - ind.ma200) / ind.ma200 < 0.01  # within 1%
+
+        if near_ma200:
+            if ind.volume_vs_avg >= 1.5:
                 score += 1
                 reasons.append(
-                    f"✅ Breakout {_breakout_zone} xác nhận bởi volume mạnh "
-                    f"({ind.volume_vs_avg:.1f}x avg) 🔥"
+                    f"✅ Breakout MA200 xác nhận bởi volume ({ind.volume_vs_avg:.1f}x avg) — tín hiệu mạnh"
+                )
+            elif ind.volume_vs_avg < 0.8:
+                score = max(0, score - 1)
+                reasons.append(
+                    f"⚠️ Breakout MA200 volume thấp ({ind.volume_vs_avg:.1f}x avg) — nguy cơ fakeout cao, score -1"
                 )
 
         # P4: Open Interest confirmation
@@ -879,6 +874,22 @@ class TAService:
             reasons.append(f"Bearish rising volume ({ind.volume_vs_avg:.1f}x avg)")
         elif ind.volume_trend == "rising" and not ind.last_candle_bearish:
             reasons.append(f"⚠️ Volume spike on bullish candle — buy pressure, not counted for SHORT")
+
+        # ── 6b. Volume Breakout Confirmation (SHORT) ────────────────────────
+        # Price breaking below MA200 on low volume = likely fake breakdown
+        near_ma200 = abs(ind.current_price - ind.ma200) / ind.ma200 < 0.01
+
+        if near_ma200:
+            if ind.volume_vs_avg >= 1.5:
+                score += 1
+                reasons.append(
+                    f"✅ Breakdown MA200 xác nhận bởi volume ({ind.volume_vs_avg:.1f}x avg) — tín hiệu mạnh"
+                )
+            elif ind.volume_vs_avg < 0.8:
+                score = max(0, score - 1)
+                reasons.append(
+                    f"⚠️ Breakdown MA200 volume thấp ({ind.volume_vs_avg:.1f}x avg) — nguy cơ false breakdown, score -1"
+                )
 
         # P4: Open Interest confirmation
         if ind.oi_change_pct is not None:
