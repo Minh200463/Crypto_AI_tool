@@ -17,7 +17,8 @@ from src.services.liquidity_service import get_liquidity_context
 from src.core.position_sizer import calculate_position_size, format_position_block
 from src.core.signal_tracker import build_signal_record, log_signal
 from src.database.settings_repository import get_user_settings, DEFAULT_EQUITY, DEFAULT_RISK_PCT
-from src.ai.context_builder import MarketContext, build_signal_context
+from src.ai.context_builder import MarketContext, build_signal_context, build_adversarial_context
+import asyncio
 from src.ai.factory import complete_with_fallback
 
 logger = logging.getLogger(__name__)
@@ -193,6 +194,22 @@ async def generate_full_signal(
     weekly_icons = {"uptrend": "📈", "downtrend": "📉", "sideways": "↔️"}
     weekly_icon = weekly_icons.get(weekly_trend, "↔️")
 
+    from src.database.signal_repository import get_open_signals
+    from src.core.risk_engine import check_portfolio_risk
+    
+    open_signals = get_open_signals()
+    risk_ok, risk_msg = check_portfolio_risk(
+        new_signal_symbol=symbol,
+        new_signal_side=side,
+        open_signals=open_signals,
+        equity=equity,
+        user_risk_pct=risk_pct
+    )
+    
+    risk_block = ""
+    if not risk_ok:
+        risk_block = f"\n\n🛑 *[BLOCKED BY RISK MANAGER]*\n⚠️ {risk_msg}\n_Bạn nên cân nhắc KHÔNG vào thêm lệnh này để bảo vệ vốn._"
+        
     text = (
         f"🎯 *Signal: {symbol} — 4H*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -206,6 +223,7 @@ async def generate_full_signal(
         + entry_block + sl_block + tp_block + "\n"
         f"🔍 *Tín hiệu kỹ thuật ({score}/10):*\n" +
         "\n".join([f"• {r}" for r in reasons])
+        + risk_block
     )
 
     if call_ai:
@@ -223,9 +241,17 @@ async def generate_full_signal(
                 daily_trend=daily_trend, last_candles=ind.last_candles,
                 support_levels=ind.support_levels, resistance_levels=ind.resistance_levels,
             )
-            prompt = build_signal_context(ctx, score, 10, reasons, side, levels)
-            ai_response = await complete_with_fallback(prompt, max_tokens=600, fast=False)
-            text += f"\n\n🤖 *AI Nhận Định:*\n_{ai_response}_" + DISCLAIMER
+            prompt_trader = build_signal_context(ctx, score, 10, reasons, side, levels)
+            prompt_risk = build_adversarial_context(ctx, side, levels)
+            
+            # Execute both AI prompts concurrently
+            trader_resp, risk_resp = await asyncio.gather(
+                complete_with_fallback(prompt_trader, max_tokens=600, fast=False),
+                complete_with_fallback(prompt_risk, max_tokens=600, fast=False)
+            )
+            
+            text += f"\n\n🤖 *Góc nhìn Trader (Setup):*\n_{trader_resp}_"
+            text += f"\n\n🛡 *Góc nhìn Risk Manager (Phản biện):*\n_{risk_resp}_" + DISCLAIMER
         except Exception as ai_err:
             logger.warning("AI signal failed for %s: %s", symbol, ai_err)
             text += "\n\n❌ _Lỗi kết nối AI._" + DISCLAIMER

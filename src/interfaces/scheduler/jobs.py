@@ -314,6 +314,26 @@ async def job_auto_scan_watchlist(bot_data: dict) -> None:
                 if not user:
                     continue
 
+                from src.database.settings_repository import get_user_settings
+                from src.core.risk_engine import check_drawdown_circuit_breaker
+                user_settings = get_user_settings(user_id)
+                equity = user_settings.get("equity", 10000.0)
+                risk_pct = user_settings.get("risk_pct", 1.0)
+                
+                # Check Circuit Breaker
+                cb_ok, cb_msg = check_drawdown_circuit_breaker(equity, risk_pct)
+                if not cb_ok:
+                    logger.warning("Circuit breaker tripped for user %d: %s", user_id, cb_msg)
+                    try:
+                        await bot.send_message(
+                            chat_id=user.telegram_id,
+                            text=f"🛑 *CIRCUIT BREAKER TRIPPED*\n{cb_msg}",
+                            parse_mode="Markdown",
+                        )
+                    except Exception:
+                        pass
+                    continue
+
                 # Get this user's watchlist symbols
                 symbols = await watchlist_repo.get_symbols(user.id)
                 if not symbols:
@@ -403,7 +423,35 @@ async def job_auto_scan_watchlist(bot_data: dict) -> None:
 
                 # Notify user for each hit found
                 mode = user_cfg["autoscan_mode"]
+                from src.database.signal_repository import get_open_signals
+                from src.core.risk_engine import check_portfolio_risk
+                
                 for hit in hits:
+                    open_signals = get_open_signals()
+                    risk_ok, risk_msg = check_portfolio_risk(
+                        new_signal_symbol=hit["symbol"],
+                        new_signal_side=hit["side"],
+                        open_signals=open_signals,
+                        equity=equity,
+                        user_risk_pct=risk_pct
+                    )
+                    
+                    if not risk_ok:
+                        try:
+                            await bot.send_message(
+                                chat_id=user.telegram_id,
+                                text=(
+                                    f"🛡 *Risk Manager Blocked!*\n"
+                                    f"{hit['side_emoji']} *{hit['coin']}* {hit['side']} — Score: `{hit['score']}/10`\n"
+                                    f"Lý do: {risk_msg}\n"
+                                    f"_Bỏ qua báo kèo tự động để bảo vệ vốn._"
+                                ),
+                                parse_mode="Markdown",
+                            )
+                        except Exception:
+                            pass
+                        continue
+                    
                     if mode == "full":
                         # Full-auto: tự chạy AI + tự log DB, không cần
                         # user gõ /signal thủ công — giải quyết trường hợp
