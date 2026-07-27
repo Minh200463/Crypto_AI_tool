@@ -43,9 +43,12 @@ def init_db() -> None:
                 outcome_price  REAL,
                 outcome_at     TEXT,
                 pnl_pct        REAL,
-                partial_close_pct REAL DEFAULT 0,
-                market_type    TEXT    DEFAULT 'auto',
-                notes          TEXT
+                liquidity_score   REAL DEFAULT 0,
+                market_type       TEXT DEFAULT 'auto',
+                entry_zone_top    REAL,
+                entry_zone_bottom REAL,
+                dca_plan          TEXT,
+                notes             TEXT
             )
         """))
 
@@ -64,7 +67,11 @@ def init_db() -> None:
     # [FIX] Mỗi ALTER TABLE trong connection/transaction riêng (xem giải thích ở settings_repository.py)
     for stmt in [
         "ALTER TABLE signal_logs ADD COLUMN partial_close_pct REAL DEFAULT 0",
+        "ALTER TABLE signal_logs ADD COLUMN liquidity_score REAL DEFAULT 0",
         "ALTER TABLE signal_logs ADD COLUMN market_type TEXT DEFAULT 'auto'",
+        "ALTER TABLE signal_logs ADD COLUMN entry_zone_top REAL",
+        "ALTER TABLE signal_logs ADD COLUMN entry_zone_bottom REAL",
+        "ALTER TABLE signal_logs ADD COLUMN dca_plan TEXT",
     ]:
         try:
             with get_conn() as conn:
@@ -105,9 +112,11 @@ class SignalRecord:
     outcome_at: Optional[str] = None
     pnl_pct: Optional[float] = None
     partial_close_pct: float = 0.0  # 0=open | 50=TP1 hit | 100=fully closed
-    # [NEW] market_type: engine that generated this signal
-    # 'auto' = current hybrid | 'spot' = /spot cmd | 'futures' = /futures cmd
+    liquidity_score: float = 0.0
     market_type: str = "auto"
+    entry_zone_top: Optional[float] = None
+    entry_zone_bottom: Optional[float] = None
+    dca_plan: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -120,16 +129,18 @@ def log_signal(rec: SignalRecord) -> int:
             INSERT INTO signal_logs
                 (symbol, side, score, tier, daily_trend, market_regime, adx,
                  entry_price, limit_entry, sl, tp1, tp2, tp3,
-                 sl_pct, rr1, rr2, fired_at, status, market_type, notes)
+                 sl_pct, rr1, rr2, fired_at, status, liquidity_score, market_type,
+                 entry_zone_top, entry_zone_bottom, dca_plan, notes)
             VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """), (
             rec.symbol, rec.side, rec.score, rec.tier,
             rec.daily_trend, rec.market_regime, rec.adx,
             rec.entry_price, rec.limit_entry,
             rec.sl, rec.tp1, rec.tp2, rec.tp3,
             rec.sl_pct, rec.rr1, rec.rr2,
-            rec.fired_at, rec.status, rec.market_type, rec.notes,
+            rec.fired_at, rec.status, rec.liquidity_score, rec.market_type,
+            rec.entry_zone_top, rec.entry_zone_bottom, rec.dca_plan, rec.notes,
         ))
         row_id = cursor.lastrowid
     logger.info("Signal logged: id=%d %s %s score=%d", row_id, rec.symbol, rec.side.upper(), rec.score)
@@ -141,6 +152,14 @@ def get_open_signals() -> list[SignalRecord]:
     with get_conn() as conn:
         rows = conn.execute(
             adapt_sql("SELECT * FROM signal_logs WHERE status = 'open' ORDER BY fired_at ASC")
+        ).fetchall()
+    return [_row_to_record(r) for r in rows]
+
+def get_waiting_signals() -> list[SignalRecord]:
+    """Return all signals with status='waiting_trigger'."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            adapt_sql("SELECT * FROM signal_logs WHERE status = 'waiting_trigger' ORDER BY fired_at ASC")
         ).fetchall()
     return [_row_to_record(r) for r in rows]
 
@@ -160,6 +179,21 @@ def update_outcome(
             WHERE id=?
         """), (status, outcome_price, now, pnl_pct, signal_id))
     logger.info("Signal #%d outcome updated: %s pnl=%.2f%%", signal_id, status, pnl_pct)
+
+
+def update_partial_close(
+    signal_id: int,
+    partial_close_pct: float,
+    new_sl: float,
+) -> None:
+    """Mark a signal as partially closed (e.g. hit TP1) and move SL to breakeven."""
+    with get_conn() as conn:
+        conn.execute(adapt_sql("""
+            UPDATE signal_logs
+            SET partial_close_pct=?, sl=?, notes=notes || ' [Partial close: moved SL to breakeven]'
+            WHERE id=?
+        """), (partial_close_pct, new_sl, signal_id))
+    logger.info("Signal #%d partially closed (%.1f%%) and SL moved to %.2f", signal_id, partial_close_pct, new_sl)
 
 
 # Tier-based expiry windows:
@@ -225,10 +259,15 @@ def get_stats(symbol: Optional[str] = None) -> dict:
 
     records = [_row_to_record(r) for r in rows]
     total = len(records)
+    # full_wins: hit TP2
     full_wins  = [r for r in records if r.status == "tp2_hit"]
-    tp1_wins   = [r for r in records if r.status == "tp1_hit"]
-    losses     = [r for r in records if r.status == "sl_hit"]
-    expired    = [r for r in records if r.status == "expired"]
+    # tp1_wins (0.5 score): 
+    # 1. Old legacy signals with status='tp1_hit'
+    # 2. Hit TP1 then SL (status='sl_hit' + pct=50)
+    # 3. Hit TP1 then expired (status='expired' + pct=50)
+    tp1_wins   = [r for r in records if r.status == "tp1_hit" or (r.status in ("sl_hit", "expired") and r.partial_close_pct == 50.0)]
+    losses     = [r for r in records if r.status == "sl_hit" and r.partial_close_pct != 50.0]
+    expired    = [r for r in records if r.status == "expired" and r.partial_close_pct != 50.0]
 
     # Count: tp2_hit = full win, tp1_hit = partial win (0.5)
     weighted_wins = len(full_wins) + len(tp1_wins) * 0.5

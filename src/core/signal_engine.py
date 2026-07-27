@@ -13,6 +13,7 @@ import asyncio
 import logging
 
 from src.core.ta_service import TAService, SCORE_TIER_A, SCORE_THRESHOLD
+from src.services.liquidity_service import get_liquidity_context
 from src.core.position_sizer import calculate_position_size, format_position_block
 from src.core.signal_tracker import build_signal_record, log_signal
 from src.database.settings_repository import get_user_settings, DEFAULT_EQUITY, DEFAULT_RISK_PCT
@@ -80,6 +81,15 @@ async def generate_full_signal(
     if oi_data and not isinstance(oi_data, Exception):
         ind.oi_change_pct = oi_data.get("oi_change_pct")
 
+    # Fetch Liquidity Context
+    try:
+        current_price = float(candles_4h[-1][4])  # close price of last 4h candle
+        liquidity_ctx = await get_liquidity_context(binance, _normalize_symbol(symbol), candles_4h, current_price)
+        ind.liquidity_context = liquidity_ctx
+    except Exception as e:
+        logger.error("Failed to fetch liquidity context for %s: %s", symbol, e)
+        ind.liquidity_context = None
+
     daily_trend = (
         ta_svc.get_daily_trend(candles_1d)
         if not isinstance(candles_1d, Exception) and len(candles_1d) >= 50
@@ -126,12 +136,18 @@ async def generate_full_signal(
             f"   💡 _Dùng /setequity 10000 để tính chính xác theo vốn của bạn_\n"
         )
 
+    import json
+    dca_plan = json.loads(levels.get("dca_plan", "[]"))
+    dca_str = "\n".join([f"   Lệnh {i+1} ({d['weight']}%): `${d['price']:,.2f}`" for i, d in enumerate(dca_plan)])
+    
     entry_block = (
-        f"📍 *Entry {levels['entry_type']}:*\n"
-        f"   Market: `${levels['entry']:,.2f}`\n"
-        f"   Limit tối ưu: `${levels['limit_entry']:,.2f}` _(Fib 0.618)_\n\n"
+        f"📍 *Vùng Entry {levels['entry_type']}:* `${levels['entry_zone_top']:,.2f}` - `${levels['entry_zone_bottom']:,.2f}`\n"
+        f"   (Giá Market hiện tại: `${levels['entry']:,.2f}`)\n"
+        f"📉 *Chiến lược DCA (Rải lệnh):*\n{dca_str}\n\n"
+        f"⏳ *Trạng thái:* Đang chờ xác nhận LTF (1H) tại vùng Entry...\n\n"
     )
-    sl_block = f"🛡 *Stop Loss:*  `${levels['sl']:,.2f}` `(-{levels['sl_pct']}%)`\n"
+    sl_warning_str = f"\n   {levels['sl_warning']}" if levels.get("sl_warning") else ""
+    sl_block = f"🛡 *Stop Loss (Structural):*  `${levels['sl']:,.2f}` `(-{levels['sl_pct']}%)`{sl_warning_str}\n"
 
     if is_tier_b:
         tp_block = (
@@ -140,10 +156,10 @@ async def generate_full_signal(
         )
     else:
         tp_block = (
-            f"🎯 *TP1:* `${levels['tp1']:,.2f}` `(R:R 1:{levels['rr1']})`\n"
+            f"🎯 *TP1 (Thanh khoản gần nhất):* `${levels['tp1']:,.2f}` `(R:R 1:{levels['rr1']})`\n"
             f"   → _Sau TP1: dời SL về `${levels['entry']:,.2f}` (breakeven) — risk\\-free_\n"
-            f"🎯 *TP2:* `${levels['tp2']:,.2f}` `(R:R 1:{levels['rr2']})`\n"
-            f"🎯 *TP3:* `${levels['tp3']:,.2f}` _(1:3 target)_\n"
+            f"🎯 *TP2 (Trước Liquidity Pool):* `${levels['tp2']:,.2f}` `(R:R 1:{levels['rr2']})`\n"
+            f"🎯 *TP3 (Gồng lời tối đa):* `${levels['tp3']:,.2f}` _(1:5 target)_\n"
         )
 
     regime = ind.market_regime
@@ -218,11 +234,13 @@ async def generate_full_signal(
 
     if log_to_db:
         try:
+            l_score = ind.liquidity_context["score"] if ind.liquidity_context else 0.0
             rec = build_signal_record(
                 symbol=symbol, side=side, score=score,
                 tier="B" if is_tier_b else "A",
                 daily_trend=daily_trend, market_regime=ind.market_regime,
                 adx=ind.adx, levels=levels,
+                liquidity_score=l_score,
             )
             log_signal(rec)
         except Exception as db_err:

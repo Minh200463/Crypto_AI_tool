@@ -152,15 +152,12 @@ def build_signal_context(
         "",
         build_analysis_context(ctx),
         "",
-        "As a professional trader with 20+ years experience, provide a structured analysis:",
-        "1. SCENARIO XÁC NHẬN: Điều kiện cụ thể nào (price level + volume) để setup này được xác nhận?",
+        "As a professional trader with 20+ years experience, provide a structured analysis for this setup:",
+        "1. KỊCH BẢN XÁC NHẬN: Điều kiện cụ thể nào (price level + volume) để setup này được xác nhận?",
         "   Ví dụ: 'Vào lệnh nếu giá đóng nến trên/dưới $X với volume > Y lần avg'",
-        "2. SCENARIO VÔ HIỆU: Level nào khiến setup này hoàn toàn mất giá trị?",
-        "   Ví dụ: 'Setup vô hiệu nếu giá phá $X'",
-        "3. ENTRY TỐI ƯU: Entry hiện tại có phải đang chase giá không? Gợi ý entry tốt hơn nếu cần pullback.",
-        "4. RỦI RO CHÍNH: Một câu về rủi ro lớn nhất của setup này ngay lúc này.",
+        "2. ENTRY TỐI ƯU: Entry hiện tại có phải đang chase giá không? Gợi ý entry tốt hơn nếu cần pullback.",
         "",
-        "Use precise price levels. Reply in Vietnamese. Keep under 6 sentences total.",
+        "Use precise price levels. Reply in Vietnamese. Keep under 4 sentences total.",
         # [FIX] Telegram does not render markdown headers — they appear as literal ###
         "IMPORTANT: Do NOT use markdown headers (###, ##, #) or bold (**text**) or bullet lists.",
         "Plain text only — use numbers (1. 2. 3.) for structure if needed.",
@@ -168,6 +165,30 @@ def build_signal_context(
     return "\n".join(lines)
 
 
+def build_adversarial_context(
+    ctx: MarketContext,
+    side: str,
+    levels: dict,
+) -> str:
+    """Format data for the Risk Manager (Adversarial) prompt."""
+    lines = [
+        f"=== Risk Management Analysis: {ctx.symbol} ({ctx.timeframe}) ===",
+        f"Proposed Signal: {side.upper()} | Entry: ${levels['entry']:,.2f}",
+        f"Stop Loss: ${levels['sl']:,.2f} ({levels.get('sl_pct', 0)}%)",
+        "",
+        build_analysis_context(ctx),
+        "",
+        "Bạn là một Risk Manager (Chuyên gia quản trị rủi ro) cực kỳ khắt khe.",
+        f"Nhiệm vụ DUY NHẤT của bạn là tìm ra lý do khiến lệnh {side.upper()} này THẤT BẠI.",
+        "Dựa vào các dữ liệu kỹ thuật và thanh khoản ở trên, hãy trả lời 2 ý sau:",
+        "1. KỊCH BẢN VÔ HIỆU (Invalidation): Level giá nào bị phá vỡ sẽ khiến lệnh này chắc chắn thua lỗ? (Nêu mức giá cụ thể).",
+        "2. MÂU THUẪN DỮ LIỆU: Có điểm dữ liệu nào đang đi ngược lại với lệnh này không? (Ví dụ: Khung tuần ngược sóng, Volume cạn kiệt, RSI phân kỳ, Funding rate quá cao).",
+        "",
+        "Reply in Vietnamese. Keep under 4 sentences total. Be direct and pessimistic.",
+        "IMPORTANT: Do NOT use markdown headers (###, ##, #) or bold (**text**) or bullet lists.",
+        "Plain text only — use numbers (1. 2.) for structure if needed.",
+    ]
+    return "\n".join(lines)
 
 def build_morning_brief_context(
     market_data: list[MarketContext],

@@ -114,28 +114,49 @@ async def job_check_rsi_alerts(bot_data: dict) -> None:
 
                     ind = ta_svc.compute_indicators(symbol, "4h", candles)
 
-                    # Alert on extreme RSI
-                    if ind.rsi < 30 or ind.rsi > 70:
-                        # Notify all users watching this symbol
-                        user_watchlists = await watchlist_repo.get_user_watchlist_by_symbol(symbol)
-                        for wl in user_watchlists:
-                            user_repo = UserRepository(db)
-                            user = await user_repo.get(wl.user_id)
-                            if not user:
-                                continue
+                    # Determine current RSI state
+                    current_state = "normal"
+                    if ind.rsi < 30:
+                        current_state = "oversold"
+                    elif ind.rsi > 70:
+                        current_state = "overbought"
 
-                            label = "oversold 🟢" if ind.rsi < 30 else "overbought 🔴"
-                            msg = (
-                                f"⚠️ *RSI Alert — {symbol}*\n"
-                                f"RSI(14) is *{label}* on 4H\n"
-                                f"Current RSI: `{ind.rsi:.1f}`\n"
-                                f"Price: `${ind.current_price:,.2f}`"
-                            )
-                            await bot.send_message(
-                                chat_id=user.telegram_id,
-                                text=msg,
-                                parse_mode="Markdown",
-                            )
+                    # Get previous state from cache
+                    cache_key = f"rsi_state_{symbol}"
+                    prev_state = "normal"
+                    if cache:
+                        cached = await cache.get(cache_key)
+                        if cached:
+                            prev_state = cached
+
+                    # State-change only: trigger when state changes
+                    if current_state != prev_state:
+                        if cache:
+                            # Cache the new state for 6 hours
+                            await cache.set(cache_key, current_state, ttl_seconds=21600)
+                        
+                        # Only send alert when entering an extreme state
+                        if current_state != "normal":
+                            # Notify all users watching this symbol
+                            user_watchlists = await watchlist_repo.get_user_watchlist_by_symbol(symbol)
+                            for wl in user_watchlists:
+                                user_repo = UserRepository(db)
+                                user = await user_repo.get(wl.user_id)
+                                if not user:
+                                    continue
+
+                                label = "oversold 🟢" if current_state == "oversold" else "overbought 🔴"
+                                msg = (
+                                    f"⚠️ *RSI Alert — {symbol}*\n"
+                                    f"RSI(14) is *{label}* on 4H\n"
+                                    f"Current RSI: `{ind.rsi:.1f}`\n"
+                                    f"Price: `${ind.current_price:,.2f}`"
+                                )
+                                await bot.send_message(
+                                    chat_id=user.telegram_id,
+                                    text=msg,
+                                    parse_mode="Markdown",
+                                )
 
                 except Exception as e:
                     logger.warning("RSI check failed for %s: %s", symbol, e)
@@ -218,7 +239,7 @@ async def job_morning_brief(bot_data: dict) -> None:
                     
                     try:
                         # fast=True -> uses Fast Provider (DeepSeek)
-                        ai_text = await complete_with_fallback(prompt, max_tokens=500, fast=False)
+                        ai_text = await complete_with_fallback(prompt, max_tokens=600, fast=False)
                     except Exception as ai_err:
                         logger.error("AI morning brief failed: %s", ai_err)
                         ai_text = "Lỗi tạo bản tin sáng từ AI."

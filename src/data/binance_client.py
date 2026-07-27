@@ -166,6 +166,37 @@ class BinanceClient:
 
         return data
 
+    async def get_order_book(self, symbol: str, limit: int = 500) -> dict:
+        """
+        Get market depth / order book.
+        limit: Default 500; Valid limits:[5, 10, 20, 50, 100, 500, 1000, 5000]
+        """
+        symbol = _normalize_symbol(symbol)
+        cache_key = f"depth:{symbol}:{limit}"
+
+        if self._cache:
+            cached = await self._cache.get(cache_key)
+            if cached:
+                return cached
+
+        # Use spot API unless it's a futures-only symbol
+        use_futures_direct = (await self._get_market_type(symbol)) == "futures"
+        try:
+            if use_futures_direct:
+                raise httpx.HTTPStatusError("skip spot", request=None, response=None)  # type: ignore
+            data = await self._get("/api/v3/depth", {"symbol": symbol, "limit": limit})
+        except httpx.HTTPStatusError as e:
+            if use_futures_direct or e.response is None or e.response.status_code == 400:
+                data = await self._get("/fapi/v1/depth", {"symbol": symbol, "limit": limit}, use_futures=True)
+            else:
+                raise
+
+        if self._cache:
+            # Depth changes very fast, cache for short duration (e.g. 10s)
+            await self._cache.set(cache_key, data, ttl_seconds=10)
+
+        return data
+
     async def get_open_interest(self, symbol: str) -> dict | None:
         """
         Get current + historical Open Interest from Futures API for trend confirmation.

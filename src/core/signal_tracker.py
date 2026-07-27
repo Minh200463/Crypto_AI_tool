@@ -29,6 +29,7 @@ from src.database.signal_repository import (
     get_stats,
     log_signal,
     update_outcome,
+    update_partial_close,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ def build_signal_record(
     market_regime: str,
     adx: float,
     levels: dict,
+    liquidity_score: float = 0.0,
 ) -> SignalRecord:
     """Helper to create a SignalRecord from signal_handler data."""
     now = datetime.now(timezone.utc).isoformat()
@@ -65,14 +67,22 @@ def build_signal_record(
         rr1=levels.get("rr1"),
         rr2=levels.get("rr2"),
         fired_at=now,
+        status="waiting_trigger",
+        liquidity_score=liquidity_score,
+        entry_zone_top=levels.get("entry_zone_top"),
+        entry_zone_bottom=levels.get("entry_zone_bottom"),
+        dca_plan=levels.get("dca_plan"),
     )
 
 
 async def check_open_signals(binance_client) -> list[dict]:
     """
-    Fetch live prices for all open signals and auto-update outcomes.
+    Fetch historical 15m/1h klines for all open signals since they were fired
+    and auto-update outcomes chronologically.
     Returns list of resolved signals (for notification).
     """
+    await check_waiting_signals(binance_client)
+
     open_signals = get_open_signals()
     if not open_signals:
         logger.info("No open signals to check.")
@@ -80,63 +90,128 @@ async def check_open_signals(binance_client) -> list[dict]:
 
     # Expire stale signals (Tier A: 7d, Tier B: 5d) before checking outcomes
     expire_old_signals()
+    # Re-fetch open signals in case some were expired
+    open_signals = get_open_signals()
 
     resolved = []
-    # Group by symbol to batch price fetches
+    # Group by symbol to batch klines fetches
     symbols = list({s.symbol for s in open_signals})
 
-    prices: dict[str, float] = {}
+    klines_dict: dict[str, list[list]] = {}
     for sym in symbols:
         try:
-            ticker = await binance_client.get_ticker(sym)
-            prices[sym] = ticker["price"]
+            # Fetch last 200 1h klines (~8 days of data, covers Tier A 7-day expiry)
+            # which is enough to find outcomes since fired_at
+            klines = await binance_client.get_klines(sym, interval="1h", limit=200)
+            klines_dict[sym] = klines
         except Exception as e:
-            logger.warning("Could not fetch price for %s: %s", sym, e)
+            logger.warning("Could not fetch klines for %s: %s", sym, e)
 
     for sig in open_signals:
-        price = prices.get(sig.symbol)
-        if price is None:
+        klines = klines_dict.get(sig.symbol)
+        if not klines:
             continue
+
+        try:
+            fired_dt = datetime.fromisoformat(sig.fired_at).replace(tzinfo=timezone.utc)
+            fired_timestamp = int(fired_dt.timestamp() * 1000)
+        except Exception:
+            # fallback if fired_at isn't parseable ISO
+            fired_timestamp = 0
 
         status = None
         pnl_pct = None
+        outcome_price = None
+        partially_closed = sig.partial_close_pct == 50.0
 
-        if sig.side == "long":
-            if price <= sig.sl:
-                status = "sl_hit"
-                pnl_pct = round((price - sig.entry_price) / sig.entry_price * 100, 2)
-            elif sig.tp2 and price >= sig.tp2:
-                status = "tp2_hit"
-                pnl_pct = round((price - sig.entry_price) / sig.entry_price * 100, 2)
-            elif price >= sig.tp1:
-                status = "tp1_hit"
-                pnl_pct = round((price - sig.entry_price) / sig.entry_price * 100, 2)
-        else:  # short
-            if price >= sig.sl:
-                status = "sl_hit"
-                pnl_pct = round((sig.entry_price - price) / sig.entry_price * 100, 2)
-            elif sig.tp2 and price <= sig.tp2:
-                status = "tp2_hit"
-                pnl_pct = round((sig.entry_price - price) / sig.entry_price * 100, 2)
-            elif price <= sig.tp1:
-                status = "tp1_hit"
-                pnl_pct = round((sig.entry_price - price) / sig.entry_price * 100, 2)
+        for k in klines:
+            # kline format: [open_time, open, high, low, close, volume, ...]
+            open_time = int(k[0])
+            if open_time < fired_timestamp:
+                continue
+            
+            high = float(k[2])
+            low = float(k[3])
+
+            if sig.side == "long":
+                # Check SL first
+                if low <= sig.sl:
+                    status = "sl_hit"
+                    outcome_price = sig.sl
+                    pnl_pct = round((outcome_price - sig.entry_price) / sig.entry_price * 100, 2)
+                    break
+                
+                # Check TP2
+                if sig.tp2 and high >= sig.tp2:
+                    status = "tp2_hit"
+                    outcome_price = sig.tp2
+                    pnl_pct = round((outcome_price - sig.entry_price) / sig.entry_price * 100, 2)
+                    break
+                
+                # Check TP1
+                if not partially_closed and high >= sig.tp1:
+                    partially_closed = True
+                    update_partial_close(sig.id, 50.0, sig.entry_price)
+                    sig.partial_close_pct = 50.0
+                    sig.sl = sig.entry_price  # Move SL to breakeven in memory
+                    resolved.append({
+                        "id": sig.id,
+                        "symbol": sig.symbol,
+                        "side": sig.side,
+                        "status": "tp1_partial",
+                        "entry": sig.entry_price,
+                        "outcome_price": sig.tp1,
+                        "pnl_pct": round((sig.tp1 - sig.entry_price) / sig.entry_price * 100, 2),
+                        "fired_at": sig.fired_at,
+                    })
+
+            else:  # short
+                # Check SL first
+                if high >= sig.sl:
+                    status = "sl_hit"
+                    outcome_price = sig.sl
+                    pnl_pct = round((sig.entry_price - outcome_price) / sig.entry_price * 100, 2)
+                    break
+                
+                # Check TP2
+                if sig.tp2 and low <= sig.tp2:
+                    status = "tp2_hit"
+                    outcome_price = sig.tp2
+                    pnl_pct = round((sig.entry_price - outcome_price) / sig.entry_price * 100, 2)
+                    break
+                
+                # Check TP1
+                if not partially_closed and low <= sig.tp1:
+                    partially_closed = True
+                    update_partial_close(sig.id, 50.0, sig.entry_price)
+                    sig.partial_close_pct = 50.0
+                    sig.sl = sig.entry_price
+                    resolved.append({
+                        "id": sig.id,
+                        "symbol": sig.symbol,
+                        "side": sig.side,
+                        "status": "tp1_partial",
+                        "entry": sig.entry_price,
+                        "outcome_price": sig.tp1,
+                        "pnl_pct": round((sig.entry_price - sig.tp1) / sig.entry_price * 100, 2),
+                        "fired_at": sig.fired_at,
+                    })
 
         if status:
-            update_outcome(sig.id, status, price, pnl_pct)
+            update_outcome(sig.id, status, outcome_price, pnl_pct)
             resolved.append({
                 "id": sig.id,
                 "symbol": sig.symbol,
                 "side": sig.side,
                 "status": status,
                 "entry": sig.entry_price,
-                "outcome_price": price,
+                "outcome_price": outcome_price,
                 "pnl_pct": pnl_pct,
                 "fired_at": sig.fired_at,
             })
             logger.info(
                 "Signal #%d %s %s resolved: %s @ $%.2f (PnL: %.2f%%)",
-                sig.id, sig.symbol, sig.side, status, price, pnl_pct,
+                sig.id, sig.symbol, sig.side, status, outcome_price, pnl_pct,
             )
 
     return resolved
@@ -225,3 +300,72 @@ def format_recent_signals_message(limit: int = 8) -> str:
         )
 
     return "\n".join(lines)
+
+async def check_waiting_signals(binance_client):
+    """
+    [Phase 2] Scan signals in 'waiting_trigger' status.
+    Check 1H candles:
+    - If price touches entry_zone and confirms LTF trigger -> switch to 'open'.
+    - If 4H candle closes beyond entry zone (invalidation) -> switch to 'invalidated'.
+    """
+    from src.database.signal_repository import get_waiting_signals
+    from src.core.ta_service import TAService
+    from src.database.db_adapter import get_conn, adapt_sql
+    
+    waiting_signals = get_waiting_signals()
+    if not waiting_signals:
+        return
+
+    symbols = list({s.symbol for s in waiting_signals})
+    klines_dict = {}
+    for sym in symbols:
+        try:
+            klines = await binance_client.get_klines(sym, interval="1h", limit=50)
+            klines_dict[sym] = klines
+        except Exception as e:
+            logger.warning("Could not fetch klines for waiting signal %s: %s", sym, e)
+
+    for sig in waiting_signals:
+        klines = klines_dict.get(sig.symbol)
+        if not klines:
+            continue
+            
+        try:
+            fired_dt = datetime.fromisoformat(sig.fired_at).replace(tzinfo=timezone.utc)
+            fired_timestamp = int(fired_dt.timestamp() * 1000)
+        except Exception:
+            fired_timestamp = 0
+
+        # filter klines after signal was fired
+        valid_klines = [k for k in klines if int(k[0]) >= fired_timestamp]
+        if not valid_klines:
+            continue
+            
+        # check if it touched entry zone
+        touched = False
+        invalidated = False
+        for k in valid_klines:
+            high = float(k[2])
+            low = float(k[3])
+            close = float(k[4])
+            
+            if sig.side == "long":
+                if low <= sig.entry_zone_top:
+                    touched = True
+                if close < sig.entry_zone_bottom:
+                    invalidated = True
+            else:
+                if high >= sig.entry_zone_bottom:
+                    touched = True
+                if close > sig.entry_zone_top:
+                    invalidated = True
+                    
+        with get_conn() as conn:
+            if invalidated:
+                conn.execute(adapt_sql("UPDATE signal_logs SET status = 'invalidated' WHERE id = ?"), (sig.id,))
+                logger.info("Signal %d INVALIDATED (Price closed beyond entry zone)", sig.id)
+            elif touched:
+                # check LTF confirmation on the most recent candles
+                if TAService.confirm_ltf_trigger(sig.side, valid_klines):
+                    conn.execute(adapt_sql("UPDATE signal_logs SET status = 'open' WHERE id = ?"), (sig.id,))
+                    logger.info("Signal %d CONFIRMED and OPENED", sig.id)

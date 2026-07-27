@@ -299,7 +299,7 @@ async def analyze_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         try:
             # fast=False -> uses Primary Provider (Claude)
-            ai_response = await complete_with_fallback(prompt, max_tokens=500, fast=False)
+            ai_response = await complete_with_fallback(prompt, max_tokens=600, fast=False)
             final_text = text + f"\n\n🤖 *AI Nhận Định:*\n_{ai_response}_"
             final_text += DISCLAIMER
             await msg.edit_text(final_text, parse_mode="Markdown")

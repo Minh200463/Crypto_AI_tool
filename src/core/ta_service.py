@@ -60,6 +60,9 @@ class IndicatorResult:
     # [NEW] 'bullish' | 'bearish' | None
     bos_signal: str | None = None
 
+    # Liquidity Engine Output (Phase 1)
+    liquidity_context: dict | None = None
+
     @property
     def rsi_label(self) -> str:
         if self.rsi >= 70:
@@ -410,6 +413,52 @@ class TAService:
 
         return None
 
+    @staticmethod
+    def confirm_ltf_trigger(side: str, ltf_klines: list) -> bool:
+        """
+        [Phase 2] LTF Confirmation Logic (15m/1h)
+        Checks if the latest LTF candles show a reversal pattern (Engulfing/Pinbar).
+        """
+        if len(ltf_klines) < 3:
+            return False
+            
+        import pandas as pd
+        df = pd.DataFrame(ltf_klines, columns=[
+            "open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_volume", "count", "taker_buy_vol", "taker_buy_quote", "ignore"
+        ])
+        
+        # Check last 2 closed candles (index -2 and -3 to avoid lookahead bias)
+        prev_open = float(df["open"].iloc[-3])
+        prev_close = float(df["close"].iloc[-3])
+        curr_open = float(df["open"].iloc[-2])
+        curr_close = float(df["close"].iloc[-2])
+        curr_high = float(df["high"].iloc[-2])
+        curr_low = float(df["low"].iloc[-2])
+        
+        if side == "long":
+            prev_bearish = prev_close < prev_open
+            curr_bullish = curr_close > curr_open
+            engulfing = prev_bearish and curr_bullish and curr_close > prev_open and curr_open < prev_close
+            
+            candle_range = curr_high - curr_low
+            body = abs(curr_close - curr_open)
+            lower_wick = min(curr_open, curr_close) - curr_low
+            pinbar = candle_range > 0 and lower_wick > body * 2 and curr_bullish
+            
+            return engulfing or pinbar
+        else:
+            prev_bullish = prev_close > prev_open
+            curr_bearish = curr_close < curr_open
+            engulfing = prev_bullish and curr_bearish and curr_close < prev_open and curr_open > prev_close
+            
+            candle_range = curr_high - curr_low
+            body = abs(curr_close - curr_open)
+            upper_wick = curr_high - max(curr_open, curr_close)
+            pinbar = candle_range > 0 and upper_wick > body * 2 and curr_bearish
+            
+            return engulfing or pinbar
+
     def _detect_swing_levels(
         self, df: pd.DataFrame, lookback: int = 100
     ) -> tuple[list[float], list[float]]:
@@ -706,8 +755,33 @@ class TAService:
                     f"⚠️ Breakout MA200 volume thấp ({ind.volume_vs_avg:.1f}x avg) — nguy cơ fakeout cao, score -1"
                 )
 
-        # P4: Open Interest confirmation
-        if ind.oi_change_pct is not None:
+        # ── P4 & Phase 1: Open Interest & Liquidity Context ──────────────────
+        if ind.liquidity_context:
+            l_ctx = ind.liquidity_context
+            for w in l_ctx.get("warnings", []):
+                reasons.append(w)
+            
+            # Bonus from liquidity score
+            if l_ctx.get("score", 5.0) >= 6.0:
+                score += 1
+                reasons.append("Thanh khoản ủng hộ (Order Book & Funding tốt) 🌊")
+            
+            # LVN check (Entry rơi vào vùng kém thanh khoản)
+            vp = l_ctx.get("volume_profile", {})
+            lvn_zones = vp.get("lvn_zones", [])
+            for z in lvn_zones:
+                if z["bottom"] <= ind.current_price <= z["top"]:
+                    reasons.append("⚠️ Giá hiện tại đang nằm trong LVN (Low Volume Node) — dễ trượt giá")
+                    break
+
+            oi_pct = l_ctx.get("funding_oi", {}).get("oi_change_pct", 0)
+            if oi_pct > 2.0 and ind.last_candle_bullish:
+                score += 1
+                reasons.append(f"OI Rising (+{oi_pct:.1f}%) + Price Rising = Strong New Longs 🟢")
+            elif oi_pct < -2.0 and ind.last_candle_bullish:
+                reasons.append(f"OI Falling ({oi_pct:.1f}%) + Price Rising = Short Covering (Weak Buy)")
+        elif ind.oi_change_pct is not None:
+            # Fallback legacy
             if ind.oi_change_pct > 2.0 and ind.last_candle_bullish:
                 score += 1
                 reasons.append(f"OI Rising (+{ind.oi_change_pct:.1f}%) + Price Rising = Strong New Longs 🟢")
@@ -891,8 +965,33 @@ class TAService:
                     f"⚠️ Breakdown MA200 volume thấp ({ind.volume_vs_avg:.1f}x avg) — nguy cơ false breakdown, score -1"
                 )
 
-        # P4: Open Interest confirmation
-        if ind.oi_change_pct is not None:
+        # ── P4 & Phase 1: Open Interest & Liquidity Context ──────────────────
+        if ind.liquidity_context:
+            l_ctx = ind.liquidity_context
+            for w in l_ctx.get("warnings", []):
+                reasons.append(w)
+            
+            # Bonus from liquidity score
+            if l_ctx.get("score", 5.0) >= 6.0:
+                score += 1
+                reasons.append("Thanh khoản ủng hộ (Order Book & Funding tốt) 🌊")
+
+            # LVN check
+            vp = l_ctx.get("volume_profile", {})
+            lvn_zones = vp.get("lvn_zones", [])
+            for z in lvn_zones:
+                if z["bottom"] <= ind.current_price <= z["top"]:
+                    reasons.append("⚠️ Giá hiện tại đang nằm trong LVN (Low Volume Node) — dễ trượt giá")
+                    break
+
+            oi_pct = l_ctx.get("funding_oi", {}).get("oi_change_pct", 0)
+            if oi_pct > 2.0 and ind.last_candle_bearish:
+                score += 1
+                reasons.append(f"OI Rising (+{oi_pct:.1f}%) + Price Falling = Strong New Shorts 🔴")
+            elif oi_pct < -2.0 and ind.last_candle_bearish:
+                reasons.append(f"OI Falling ({oi_pct:.1f}%) + Price Falling = Long Liquidation (Weak Sell)")
+        elif ind.oi_change_pct is not None:
+            # Fallback legacy
             if ind.oi_change_pct > 2.0 and ind.last_candle_bearish:
                 score += 1
                 reasons.append(f"OI Rising (+{ind.oi_change_pct:.1f}%) + Price Falling = Strong New Shorts 🔴")
@@ -962,147 +1061,194 @@ class TAService:
         is_tier_b: bool = False,
     ) -> dict:
         """
-        Calculate TP1/TP2/TP3 and SL based on ATR + swing levels.
-        v2: Adds optimal limit entry (Fib 0.618 retracement) and
-            classifies entry as 'limit' vs 'market'.
-        is_tier_b: If True, use tighter SL (1.0x ATR) for weaker setups.
-        Returns dict with entry zones, sl, tp1, tp2, tp3, R:R.
+        Calculate TP1/TP2/TP3, SL, and DCA Plan based on ATR + swing + liquidity levels.
+        v2 (Phase 2): Adds DCA multi-tier entry (Fib 0.5 - 0.786) and HVN/LVN intersection.
+        Returns dict with entry zones, sl, tp1, tp2, tp3, R:R, and dca_plan.
         """
         atr = ind.atr
         # Tier B (score 6–7) uses tighter SL to limit risk on weaker setups
         sl_atr_mult = 1.0 if is_tier_b else 1.5
 
         if side == "long":
-            nearest_support = ind.nearest_support
+            import json
 
-            if nearest_support is not None:
-                # Use swing support + buffer, but don't let SL be wider than sl_atr_mult
-                sl_from_support = nearest_support - atr * 0.5
-                sl_from_atr = entry - atr * sl_atr_mult
-                sl = min(sl_from_support, sl_from_atr)  # pick tighter of the two
-                sl = max(sl, entry - atr * (sl_atr_mult + 0.5))  # floor: never wider than mult+0.5
+            # ── 1. Swing High/Low (Phase 2 & 3) ─────────────────────────────
+            if len(ind.last_candles) >= 20:
+                recent = ind.last_candles[-20:]
+                swing_high = max(float(c["high"]) for c in recent)
+                swing_low = min(float(c["low"]) for c in recent)
             else:
-                # No swing level — use pure ATR-based SL
-                sl = entry - atr * sl_atr_mult
+                swing_high = entry + atr * 2
+                swing_low = entry - atr * 2
+                
+            swing_range = swing_high - swing_low
+            if swing_range <= 0:
+                swing_range = atr * 2
+                swing_high = entry + atr
+            
+            # ── 2. Structural SL (Phase 3) ─────────────────────────────
+            sl_warning = None
+            pools = ind.liquidity_context.get("liquidity_pools", {}) if ind.liquidity_context else {}
+            support_pools = pools.get("support_pools", [])
+            pools_below = [p["price"] for p in support_pools if p["price"] < swing_low]
+            nearest_pool = max(pools_below) if pools_below else swing_low
+            
+            sl = min(swing_low, nearest_pool) - (atr * 0.25)
+            
+            sl_distance_atr = abs(entry - sl) / atr
+            if sl_distance_atr > 2.5:
+                sl_warning = "⚠️ SL cấu trúc khá xa (>2.5 ATR), cân nhắc rủi ro."
+            elif sl_distance_atr < 0.5:
+                sl_warning = "⚠️ SL cấu trúc quá hẹp (<0.5 ATR), dễ bị quét (Stop Hunt)."
 
-            # Entry Zone: Fib 0.618 of last CLOSED candle (P1: [-2], not forming)
-            # Using closed candle prevents using mid-candle inflated highs/lows.
-            last_closed = ind.last_candles[-2] if len(ind.last_candles) >= 2 else (
-                ind.last_candles[-1] if ind.last_candles else None
-            )
-            if last_closed and use_limit_entry:
-                candle_range = last_closed["high"] - last_closed["low"]
-                limit_entry = last_closed["high"] - candle_range * 0.618
-                if nearest_support is not None:
-                    limit_entry = max(limit_entry, nearest_support + atr * 0.3)
-                # Sanity guard: limit_entry must be below current price (it's a buy dip)
-                limit_entry = min(limit_entry, entry)
+            import json
+
+
+            # Retrace from swing high down
+            fib_0_5 = swing_high - swing_range * 0.5
+            fib_0_618 = swing_high - swing_range * 0.618
+            fib_0_786 = swing_high - swing_range * 0.786
+            
+            entry_zone_top = min(entry, fib_0_5) if not is_tier_b else min(entry, fib_0_618)
+            entry_zone_bottom = min(entry, fib_0_786)
+
+            if not is_tier_b:
+                dca = [
+                    {"price": fib_0_5, "weight": 40},
+                    {"price": fib_0_618, "weight": 35},
+                    {"price": fib_0_786, "weight": 25}
+                ]
             else:
-                limit_entry = entry
+                dca = [
+                    {"price": fib_0_618, "weight": 50},
+                    {"price": fib_0_786, "weight": 50}
+                ]
 
-            # ── TPs: R:R-aware with minimum floor ─────────────────────────
-            # Problem solved: nearest_resistance can be very close in chop
-            # markets, giving R:R 1:0.1 which is not tradeable.
-            # Solution: enforce minimum R:R 1:1.5 floor for TP1.
+            # Adjust if in LVN (Phase 2 intersection)
+            if ind.liquidity_context and "volume_profile" in ind.liquidity_context:
+                lvn_zones = ind.liquidity_context["volume_profile"].get("lvn_zones", [])
+                for d in dca:
+                    p = d["price"]
+                    for lvn in lvn_zones:
+                        if lvn["bottom"] <= p <= lvn["top"]:
+                            # Move price down to nearest better price (for LONG, move down)
+                            d["price"] = lvn["bottom"] - atr * 0.1
+                            break
+
+            # Sanity guards
+            for d in dca:
+                if d["price"] > entry:
+                    d["price"] = entry
+            
+            limit_entry = dca[0]["price"] # For legacy compatibility
+            entry_type = "LIMIT" if use_limit_entry else "MARKET"
+
+            # ── 3. Liquidity-Aware TP (Phase 3) ──────────────────────────
             sl_dist_long = abs(entry - sl)
-            min_tp1_dist = sl_dist_long * 1.5  # Minimum 1:1.5 R:R
+            tp1 = entry + sl_dist_long * 1.5
 
-            resistances = [r for r in ind.resistance_levels if r > entry]
+            resistance_pools = pools.get("resistance_pools", [])
+            pools_above = [p["price"] for p in resistance_pools if p["price"] > entry]
+            next_pool = min(pools_above) if pools_above else None
 
-            # TP1: nearest resistance, but enforce min R:R 1:1.5
-            if resistances and (resistances[0] - entry) >= min_tp1_dist:
-                tp1 = resistances[0]
+            if next_pool:
+                buffer = sl_dist_long * 0.1
+                tp_before_pool = next_pool - buffer
+                tp2 = max(tp1, tp_before_pool)
             else:
-                # Resistance too close → use ATR-based TP1 (2x ATR)
-                tp1_atr = entry + atr * 2
-                tp1 = max(tp1_atr, entry + min_tp1_dist)
+                tp2 = entry + sl_dist_long * 3
 
-            # TP2: next resistance or ATR*3, whichever is farther
-            tp2_from_level = resistances[1] if len(resistances) > 1 else entry + atr * 4
-            tp2_from_atr = entry + atr * 3
-            tp2 = max(tp2_from_level, tp2_from_atr)
-
-            # TP3: fixed 1:3 R:R from SL distance (always reliable)
-            tp3 = entry + sl_dist_long * 3
-
-            # FVG-aware TP boost: if an unfilled bullish FVG exists above entry,
-            # use its top as a potential TP target (institutional magnet)
-            for fvg in ind.fvg_zones:
-                if fvg["type"] == "bearish" and fvg["top"] > tp1:
-                    # Bearish FVG above = price magnet to fill it
-                    tp2 = max(tp2, fvg["top"])
-                    break
-
-            # Minimum spacing: TP1 < TP2 < TP3 (monotonically increasing)
-            tp1_dist = tp1 - entry
-            if tp2 - entry <= tp1_dist * 1.2:
-                tp2 = entry + tp1_dist * 2.0  # push TP2 to 2x TP1 distance
-            # TP3 must always be beyond TP2
-            tp3 = max(tp3, tp2 + tp1_dist)  # at least TP2 + one TP1-width
+            tp3 = entry + sl_dist_long * 5
 
             entry_type = "LIMIT" if abs(limit_entry - entry) > atr * 0.1 else "MARKET"
 
         else:  # short
-            nearest_resistance = ind.nearest_resistance
+            import json
 
-            if nearest_resistance is None:
-                nearest_resistance = entry + atr * sl_atr_mult
-
-            # Cap resistance-based SL — don't use if too far (> sl_atr_mult + 1.5)
-            if nearest_resistance - entry > atr * (sl_atr_mult + 1.5):
-                nearest_resistance = entry + atr * sl_atr_mult
-
-            sl_from_resistance = nearest_resistance + atr * 0.5
-            sl_from_atr = entry + atr * sl_atr_mult
-            sl = max(sl_from_resistance, sl_from_atr)
-
-            # Entry Zone: Fib 0.618 of last CLOSED candle (P1: [-2])
-            last_closed = ind.last_candles[-2] if len(ind.last_candles) >= 2 else (
-                ind.last_candles[-1] if ind.last_candles else None
-            )
-            if last_closed and use_limit_entry:
-                candle_range = last_closed["high"] - last_closed["low"]
-                limit_entry = last_closed["low"] + candle_range * 0.618
-                if nearest_resistance is not None:
-                    limit_entry = min(limit_entry, nearest_resistance - atr * 0.3)
-                # Sanity guard: limit_entry must be above current price (it's a sell bounce)
-                limit_entry = max(limit_entry, entry)
+            # ── 1. Swing High/Low (Phase 2 & 3) ─────────────────────────────
+            if len(ind.last_candles) >= 20:
+                recent = ind.last_candles[-20:]
+                swing_high = max(float(c["high"]) for c in recent)
+                swing_low = min(float(c["low"]) for c in recent)
             else:
-                limit_entry = entry
+                swing_high = entry + atr * 2
+                swing_low = entry - atr * 2
+                
+            swing_range = swing_high - swing_low
+            if swing_range <= 0:
+                swing_range = atr * 2
+                swing_low = entry - atr
 
-            # ── TPs: R:R-aware with minimum floor (SHORT mirror) ──────────
+            # ── 2. Structural SL (Phase 3) ─────────────────────────────
+            sl_warning = None
+            pools = ind.liquidity_context.get("liquidity_pools", {}) if ind.liquidity_context else {}
+            resistance_pools = pools.get("resistance_pools", [])
+            pools_above = [p["price"] for p in resistance_pools if p["price"] > swing_high]
+            nearest_pool = min(pools_above) if pools_above else swing_high
+            
+            sl = max(swing_high, nearest_pool) + (atr * 0.25)
+
+            sl_distance_atr = abs(entry - sl) / atr
+            if sl_distance_atr > 2.5:
+                sl_warning = "⚠️ SL cấu trúc khá xa (>2.5 ATR), cân nhắc rủi ro."
+            elif sl_distance_atr < 0.5:
+                sl_warning = "⚠️ SL cấu trúc quá hẹp (<0.5 ATR), dễ bị quét (Stop Hunt)."
+
+
+
+            # Retrace from swing low up
+            fib_0_5 = swing_low + swing_range * 0.5
+            fib_0_618 = swing_low + swing_range * 0.618
+            fib_0_786 = swing_low + swing_range * 0.786
+
+            entry_zone_top = max(entry, fib_0_5) if not is_tier_b else max(entry, fib_0_618)
+            entry_zone_bottom = max(entry, fib_0_786)
+
+            if not is_tier_b:
+                dca = [
+                    {"price": fib_0_5, "weight": 40},
+                    {"price": fib_0_618, "weight": 35},
+                    {"price": fib_0_786, "weight": 25}
+                ]
+            else:
+                dca = [
+                    {"price": fib_0_618, "weight": 50},
+                    {"price": fib_0_786, "weight": 50}
+                ]
+
+            if ind.liquidity_context and "volume_profile" in ind.liquidity_context:
+                lvn_zones = ind.liquidity_context["volume_profile"].get("lvn_zones", [])
+                for d in dca:
+                    p = d["price"]
+                    for lvn in lvn_zones:
+                        if lvn["bottom"] <= p <= lvn["top"]:
+                            # Move price up to nearest better price (for SHORT, move up)
+                            d["price"] = lvn["top"] + atr * 0.1
+                            break
+
+            for d in dca:
+                if d["price"] < entry:
+                    d["price"] = entry
+
+            limit_entry = dca[0]["price"]
+            entry_type = "LIMIT" if use_limit_entry else "MARKET"
+
+            # ── 3. Liquidity-Aware TP (Phase 3) ──────────────────────────
             sl_dist_short = abs(sl - entry)
-            min_tp1_dist = sl_dist_short * 1.5  # Minimum 1:1.5 R:R
+            tp1 = entry - sl_dist_short * 1.5
 
-            supports = [s for s in ind.support_levels if s < entry]
+            support_pools = pools.get("support_pools", [])
+            pools_below = [p["price"] for p in support_pools if p["price"] < entry]
+            next_pool = max(pools_below) if pools_below else None
 
-            # TP1: nearest support, but enforce min R:R 1:1.5
-            if supports and (entry - supports[0]) >= min_tp1_dist:
-                tp1 = supports[0]
+            if next_pool:
+                buffer = sl_dist_short * 0.1
+                tp_before_pool = next_pool + buffer
+                tp2 = min(tp1, tp_before_pool)
             else:
-                tp1_atr = entry - atr * 2
-                tp1 = min(tp1_atr, entry - min_tp1_dist)
+                tp2 = entry - sl_dist_short * 3
 
-            # TP2: next support or ATR*3, whichever is farther
-            tp2_from_level = supports[1] if len(supports) > 1 else entry - atr * 4
-            tp2_from_atr = entry - atr * 3
-            tp2 = min(tp2_from_level, tp2_from_atr)
-
-            # TP3: fixed 1:3 R:R
-            tp3 = entry - sl_dist_short * 3
-
-            # FVG-aware TP boost: bullish FVG below = price magnet
-            for fvg in ind.fvg_zones:
-                if fvg["type"] == "bullish" and fvg["bottom"] < tp1:
-                    tp2 = min(tp2, fvg["bottom"])
-                    break
-
-            # Minimum spacing: TP1 > TP2 > TP3 (monotonically decreasing for SHORT)
-            tp1_dist = entry - tp1
-            if entry - tp2 <= tp1_dist * 1.2:
-                tp2 = entry - tp1_dist * 2.0
-            # TP3 must always be beyond (below) TP2
-            tp3 = min(tp3, tp2 - tp1_dist)
+            tp3 = entry - sl_dist_short * 5
 
             entry_type = "LIMIT" if abs(limit_entry - entry) > atr * 0.1 else "MARKET"
 
@@ -1124,7 +1270,11 @@ class TAService:
             "entry": round(entry, dp),
             "limit_entry": round(limit_entry, dp),
             "entry_type": entry_type,
+            "entry_zone_top": round(entry_zone_top, dp),
+            "entry_zone_bottom": round(entry_zone_bottom, dp),
+            "dca_plan": json.dumps([{ "price": round(d["price"], dp), "weight": d["weight"] } for d in dca]),
             "sl": round(sl, dp),
+            "sl_warning": sl_warning,
             "tp1": round(tp1, dp),
             "tp2": round(tp2, dp),
             "tp3": round(tp3, dp),
