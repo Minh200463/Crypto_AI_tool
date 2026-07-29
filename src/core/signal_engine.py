@@ -102,13 +102,13 @@ async def generate_full_signal(
         else "sideways"
     )
 
-    long_score, long_reasons = ta_svc.score_long_setup(ind, daily_trend, weekly_trend)
-    short_score, short_reasons = ta_svc.score_short_setup(ind, daily_trend, weekly_trend)
+    long_score, long_reasons, long_breakdown = ta_svc.score_long_setup(ind, daily_trend, weekly_trend)
+    short_score, short_reasons, short_breakdown = ta_svc.score_short_setup(ind, daily_trend, weekly_trend)
 
     if long_score >= SCORE_THRESHOLD:
-        side, score, reasons, emoji = "long", long_score, long_reasons, "🟢 LONG"
+        side, score, reasons, breakdown, emoji = "long", long_score, long_reasons, long_breakdown, "🟢 LONG"
     elif short_score >= SCORE_THRESHOLD:
-        side, score, reasons, emoji = "short", short_score, short_reasons, "🔴 SHORT"
+        side, score, reasons, breakdown, emoji = "short", short_score, short_reasons, short_breakdown, "🔴 SHORT"
     else:
         return NoSignalResult(symbol, long_score, short_score, daily_trend, weekly_trend)
 
@@ -267,6 +267,7 @@ async def generate_full_signal(
                 daily_trend=daily_trend, market_regime=ind.market_regime,
                 adx=ind.adx, levels=levels,
                 liquidity_score=l_score,
+                score_breakdown=breakdown,
             )
             log_signal(rec)
         except Exception as db_err:

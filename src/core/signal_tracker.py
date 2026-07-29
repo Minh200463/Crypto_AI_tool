@@ -20,6 +20,7 @@ Known limitations:
     to SL still counts as win. No partial_close field in v1 schema.
 """
 import logging
+import json
 from datetime import datetime, timezone
 
 from src.database.signal_repository import (
@@ -45,6 +46,7 @@ def build_signal_record(
     adx: float,
     levels: dict,
     liquidity_score: float = 0.0,
+    score_breakdown: dict = None,
 ) -> SignalRecord:
     """Helper to create a SignalRecord from signal_handler data."""
     now = datetime.now(timezone.utc).isoformat()
@@ -72,6 +74,8 @@ def build_signal_record(
         entry_zone_top=levels.get("entry_zone_top"),
         entry_zone_bottom=levels.get("entry_zone_bottom"),
         dca_plan=levels.get("dca_plan"),
+        score_breakdown=json.dumps(score_breakdown) if score_breakdown else None,
+        notes=None,
     )
 
 
@@ -269,6 +273,45 @@ def format_stats_message(symbol: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def format_performance_message() -> str:
+    """Build a Telegram-ready performance report."""
+    stats = get_stats()
+    if stats.get("total", 0) == 0:
+        return "Chưa có đủ dữ liệu để phân tích Performance."
+
+    regime = stats.get("regime_breakdown", {})
+    t = regime.get("trending", {"total": 0, "wins": 0})
+    r = regime.get("ranging", {"total": 0, "wins": 0})
+    tr = regime.get("transitional", {"total": 0, "wins": 0})
+    
+    t_wr = round(t["wins"] / t["total"] * 100, 1) if t["total"] else 0
+    r_wr = round(r["wins"] / r["total"] * 100, 1) if r["total"] else 0
+    tr_wr = round(tr["wins"] / tr["total"] * 100, 1) if tr["total"] else 0
+    
+    def bar(pct):
+        filled = int(pct / 10)
+        return "█" * filled + "░" * (10 - filled)
+        
+    lines = [
+        "📊 *Performance Dashboard (Phase 7)*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "🌍 *Tổng quan Win Rate:*",
+        f"`{stats.get('win_rate_pct', 0)}%` {bar(stats.get('win_rate_pct', 0))} `({stats.get('wins', 0)}/{stats.get('total', 0)})`",
+        "",
+        "📈 *Win Rate Theo Regime (Điều kiện thị trường):*",
+        f"• *Trending* (ADX > 25):",
+        f"  `{t_wr}%` {bar(t_wr)} `({t['wins']}/{t['total']})`",
+        f"• *Ranging* (ADX < 20):",
+        f"  `{r_wr}%` {bar(r_wr)} `({r['wins']}/{r['total']})`",
+        f"• *Transitional*:",
+        f"  `{tr_wr}%` {bar(tr_wr)} `({tr['wins']}/{tr['total']})`",
+        "",
+        "💡 _Nếu Win Rate ở giai đoạn Ranging suy giảm, hãy tăng điểm phạt ADX hoặc tạm ngưng trade._"
+    ]
+    return "\n".join(lines)
+
+
 
 def format_recent_signals_message(limit: int = 8) -> str:
     """Build a summary of the last N signals for display."""
@@ -369,3 +412,36 @@ async def check_waiting_signals(binance_client):
                 if TAService.confirm_ltf_trigger(sig.side, valid_klines):
                     conn.execute(adapt_sql("UPDATE signal_logs SET status = 'open' WHERE id = ?"), (sig.id,))
                     logger.info("Signal %d CONFIRMED and OPENED", sig.id)
+
+def check_rolling_performance(limit: int = 20, threshold_pct: float = 40.0) -> str | None:
+    """
+    Check the win rate of the last N resolved signals.
+    If it drops below the threshold, return an alert message string.
+    Otherwise return None.
+    """
+    from src.database.db_adapter import get_conn, adapt_sql
+    with get_conn() as conn:
+        rows = conn.execute(
+            adapt_sql("SELECT status FROM signal_logs WHERE status != 'open' AND status != 'waiting_trigger' ORDER BY fired_at DESC LIMIT ?"), (limit,)
+        ).fetchall()
+        
+    if len(rows) < limit:
+        return None  # Not enough data for a rolling window yet
+        
+    wins = 0.0
+    for r in rows:
+        status = r["status"]
+        if status == "tp2_hit":
+            wins += 1.0
+        elif status == "tp1_hit":
+            wins += 0.5
+            
+    win_rate = (wins / limit) * 100
+    if win_rate < threshold_pct:
+        return (
+            f"⚠️ *CẢNH BÁO HIỆU SUẤT (Phase 7)* ⚠️\n"
+            f"Win rate {limit} lệnh gần nhất đã giảm xuống `{win_rate:.1f}%` "
+            f"(Dưới ngưỡng `{threshold_pct}%`).\n\n"
+            f"Hệ thống có thể đang lệch Regime. Cần review lại các thông số hoặc tạm ngưng giao dịch."
+        )
+    return None

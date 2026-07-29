@@ -72,6 +72,7 @@ def init_db() -> None:
         "ALTER TABLE signal_logs ADD COLUMN entry_zone_top REAL",
         "ALTER TABLE signal_logs ADD COLUMN entry_zone_bottom REAL",
         "ALTER TABLE signal_logs ADD COLUMN dca_plan TEXT",
+        "ALTER TABLE signal_logs ADD COLUMN score_breakdown TEXT",
     ]:
         try:
             with get_conn() as conn:
@@ -117,6 +118,7 @@ class SignalRecord:
     entry_zone_top: Optional[float] = None
     entry_zone_bottom: Optional[float] = None
     dca_plan: Optional[str] = None
+    score_breakdown: Optional[str] = None
     notes: Optional[str] = None
 
 
@@ -130,9 +132,9 @@ def log_signal(rec: SignalRecord) -> int:
                 (symbol, side, score, tier, daily_trend, market_regime, adx,
                  entry_price, limit_entry, sl, tp1, tp2, tp3,
                  sl_pct, rr1, rr2, fired_at, status, liquidity_score, market_type,
-                 entry_zone_top, entry_zone_bottom, dca_plan, notes)
+                 entry_zone_top, entry_zone_bottom, dca_plan, score_breakdown, notes)
             VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """), (
             rec.symbol, rec.side, rec.score, rec.tier,
             rec.daily_trend, rec.market_regime, rec.adx,
@@ -140,7 +142,7 @@ def log_signal(rec: SignalRecord) -> int:
             rec.sl, rec.tp1, rec.tp2, rec.tp3,
             rec.sl_pct, rec.rr1, rec.rr2,
             rec.fired_at, rec.status, rec.liquidity_score, rec.market_type,
-            rec.entry_zone_top, rec.entry_zone_bottom, rec.dca_plan, rec.notes,
+            rec.entry_zone_top, rec.entry_zone_bottom, rec.dca_plan, rec.score_breakdown, rec.notes,
         ))
         row_id = cursor.lastrowid
     logger.info("Signal logged: id=%d %s %s score=%d", row_id, rec.symbol, rec.side.upper(), rec.score)
@@ -299,6 +301,20 @@ def get_stats(symbol: Optional[str] = None) -> dict:
         "tier_b_total": len(tier_b),
         "tier_b_wins": len(tier_b_wins),
         "tier_b_win_rate": round(len(tier_b_wins) / len(tier_b) * 100, 1) if tier_b else 0,
+        "regime_breakdown": {
+            "trending": {
+                "total": len([r for r in records if r.market_regime == "trending"]),
+                "wins": len([r for r in all_wins if r.market_regime == "trending"])
+            },
+            "ranging": {
+                "total": len([r for r in records if r.market_regime == "ranging"]),
+                "wins": len([r for r in all_wins if r.market_regime == "ranging"])
+            },
+            "transitional": {
+                "total": len([r for r in records if r.market_regime == "transitional"]),
+                "wins": len([r for r in all_wins if r.market_regime == "transitional"])
+            }
+        }
     }
 
 
@@ -337,6 +353,11 @@ def _row_to_record(row: dict) -> SignalRecord:
         outcome_at=d.get("outcome_at"),
         pnl_pct=d.get("pnl_pct"),
         partial_close_pct=d.get("partial_close_pct") or 0.0,
+        liquidity_score=d.get("liquidity_score") or 0.0,
+        entry_zone_top=d.get("entry_zone_top"),
+        entry_zone_bottom=d.get("entry_zone_bottom"),
+        dca_plan=d.get("dca_plan"),
+        score_breakdown=d.get("score_breakdown"),
         market_type=d.get("market_type") or "auto",  # [NEW]
         notes=d.get("notes"),
     )

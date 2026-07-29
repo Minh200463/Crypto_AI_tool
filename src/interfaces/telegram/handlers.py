@@ -20,6 +20,7 @@ from src.core.signal_tracker import (
     build_signal_record,
     check_open_signals,
     format_stats_message,
+    format_performance_message,
     format_recent_signals_message,
     log_signal,
 )
@@ -600,10 +601,29 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as e:
         logger.error("Stats error: %s", e)
-        await msg.edit_text("❌ Lỗi tải thống kê.")
+        await msg.edit_text(f"❌ _Lỗi tính toán thống kê: {e}_", parse_mode="Markdown")
 
 
-# ─── /history — Recent signal log ────────────────────────────────────────────
+# ─── /performance — Win/Loss detail by regime (Phase 7) ──────────────────────
+
+async def performance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /performance
+    Show detailed performance dashboard including market regime breakdown.
+    """
+    if not update.effective_message:
+        return
+
+    msg = await update.effective_message.reply_text("📊 _Đang phân tích dữ liệu hiệu suất..._", parse_mode="Markdown")
+    try:
+        text = format_performance_message()
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception as err:
+        logger.error("Performance error: %s", err)
+        await msg.edit_text(f"❌ _Lỗi phân tích hiệu suất: {err}_", parse_mode="Markdown")
+
+
+# ─── /history — Recent signals ────────────────────────────────────────────────
 
 async def history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """

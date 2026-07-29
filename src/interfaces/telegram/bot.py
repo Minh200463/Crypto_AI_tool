@@ -48,6 +48,7 @@ def setup_bot(cache, db_session_factory) -> Application | None:
         ("clearall",       handlers.clearall_handler),
         # Backtesting & Stats
         ("stats",          handlers.stats_handler),
+        ("performance",    handlers.performance_handler),
         ("history",        handlers.history_handler),
         ("checkoutcomes",  handlers.checkoutcomes_handler),
         # Position Sizing
@@ -72,7 +73,8 @@ def setup_bot(cache, db_session_factory) -> Application | None:
 def _register_outcome_checker(app: Application) -> None:
     """Register a periodic job (every 4H) to auto-check open signal outcomes."""
     try:
-        from src.core.signal_tracker import check_open_signals
+        from src.core.signal_tracker import check_open_signals, check_rolling_performance
+        from src.database.settings_repository import get_all_autoscan_users
 
         async def _auto_check(context):
             binance = context.bot_data.get("binance")
@@ -81,6 +83,20 @@ def _register_outcome_checker(app: Application) -> None:
             resolved = await check_open_signals(binance)
             if resolved:
                 logger.info("Auto-check: %d signals resolved", len(resolved))
+                
+                # Phase 7: Check rolling performance after resolving signals
+                alert_msg = check_rolling_performance()
+                if alert_msg:
+                    autoscan_users = get_all_autoscan_users()
+                    for user in autoscan_users:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=user.telegram_id,
+                                text=alert_msg,
+                                parse_mode="Markdown"
+                            )
+                        except Exception as e:
+                            logger.error("Failed to send performance alert to %s: %s", user.telegram_id, e)
 
         # Run every 4 hours (14400 seconds), first run after 60s
         app.job_queue.run_repeating(_auto_check, interval=14400, first=60)

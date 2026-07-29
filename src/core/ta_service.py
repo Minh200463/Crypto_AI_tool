@@ -607,7 +607,7 @@ class TAService:
         ind: IndicatorResult,
         daily_trend: str = "sideways",
         weekly_trend: str = "sideways",
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], dict]:
         """
         Confluence scoring for LONG signal.
         Scale: 0–10. Threshold: 6 to fire signal.
@@ -620,15 +620,16 @@ class TAService:
         """
         score = 0
         reasons: list[str] = []
+        breakdown: dict = {}
 
         # ── [L2] Block if daily is bearish ───────────────────────────────
         if daily_trend == "downtrend":
-            return 0, ["❌ Blocked: Daily trend is DOWNTREND — no long signals"]
+            return 0, ["❌ Blocked: Daily trend is DOWNTREND — no long signals"], {}
 
         # ── [L3] Weekly macro trend check ────────────────────────────────
         # Hard block: weekly AND daily both bearish — deep bear market, no LONG
         if weekly_trend == "downtrend" and daily_trend == "downtrend":
-            return 0, ["❌ Blocked: Weekly + Daily DOWNTREND — macro bear market"]
+            return 0, ["❌ Blocked: Weekly + Daily DOWNTREND — macro bear market"], {}
         # Soft warning: weekly bearish but daily is a counter-trend relief rally
         weekly_counter = (weekly_trend == "downtrend")
         if weekly_counter:
@@ -844,14 +845,14 @@ class TAService:
             score += 1
             reasons.append("📈 BOS xác nhận — phá vỡ swing high cấu trúc, trend mới hình thành 🎯")
 
-        return score, reasons
+        return score, reasons, breakdown
 
     def score_short_setup(
         self,
         ind: IndicatorResult,
         daily_trend: str = "sideways",
         weekly_trend: str = "sideways",
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], dict]:
         """
         Confluence scoring for SHORT signal.
         Scale: 0–10. Threshold: 6 to fire signal.
@@ -863,15 +864,16 @@ class TAService:
         """
         score = 0
         reasons: list[str] = []
+        breakdown: dict = {}
 
         # ── [L2] Block if daily is bullish ───────────────────────────────
         if daily_trend == "uptrend":
-            return 0, ["❌ Blocked: Daily trend is UPTREND — no short signals"]
+            return 0, ["❌ Blocked: Daily trend is UPTREND — no short signals"], {}
 
         # ── [L3] Weekly macro trend check ────────────────────────────────
         # Hard block: weekly AND daily both bullish — bull market, no SHORT
         if weekly_trend == "uptrend" and daily_trend == "uptrend":
-            return 0, ["❌ Blocked: Weekly + Daily UPTREND — macro bull market"]
+            return 0, ["❌ Blocked: Weekly + Daily UPTREND — macro bull market"], {}
         # Soft warning: weekly bullish but daily shows a counter-trend pullback
         weekly_counter = (weekly_trend == "uptrend")
         if weekly_counter:
@@ -1048,7 +1050,7 @@ class TAService:
             score += 1
             reasons.append("📉 BOS xác nhận — phá vỡ swing low cấu trúc, downtrend mới hình thành 🎯")
 
-        return score, reasons
+        return score, reasons, breakdown
 
     # ── Entry Zone (v2) ──────────────────────────────────────────────────────
 
