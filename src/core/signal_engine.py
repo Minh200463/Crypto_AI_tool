@@ -122,14 +122,32 @@ async def generate_full_signal(
     equity, risk_pct = user_cfg["equity"], user_cfg["risk_pct"]
     sl_pct = levels.get("sl_pct") or 2.0
 
+    import json
+    dca_plan = json.loads(levels.get("dca_plan", "[]"))
+    if dca_plan:
+        weighted_avg_entry = sum(d["price"] * (d["weight"] / 100.0) for d in dca_plan)
+    else:
+        weighted_avg_entry = ind.current_price
+
     ps = calculate_position_size(
         equity=equity, risk_pct=risk_pct,
-        entry_price=ind.current_price, sl_pct=sl_pct, tier=tier_label,
+        entry_price=weighted_avg_entry, sl_pct=sl_pct, tier=tier_label,
     )
+    
+    from src.services.liquidity_service import calculate_slippage
+    depth_data = ind.liquidity_context.get("depth", {}) if ind.liquidity_context else {}
+    slippage_pct = calculate_slippage(depth_data, ps.position_size_usd, side, ind.current_price)
+    
+    if slippage_pct > 0.5:
+        slip_warning = f"\n   ⚠️ *Cảnh báo trượt giá:* Ước tính trượt ~{slippage_pct}% (Volume quá lớn so với Order Book)"
+    elif slippage_pct > 0:
+        slip_warning = f"\n   ℹ️ *Trượt giá dự kiến:* ~{slippage_pct}%"
+    else:
+        slip_warning = ""
 
     user_has_config = not (equity == DEFAULT_EQUITY and risk_pct == DEFAULT_RISK_PCT)
     if user_has_config:
-        sizing_block = format_position_block(ps) + "\n"
+        sizing_block = format_position_block(ps) + slip_warning + "\n"
     else:
         static = "Full size (1–2% vốn)" if not is_tier_b else "Half size (0.5–1% vốn) — thận trọng"
         sizing_block = (
@@ -137,8 +155,6 @@ async def generate_full_signal(
             f"   💡 _Dùng /setequity 10000 để tính chính xác theo vốn của bạn_\n"
         )
 
-    import json
-    dca_plan = json.loads(levels.get("dca_plan", "[]"))
     dca_str = "\n".join([f"   Lệnh {i+1} ({d['weight']}%): `${d['price']:,.2f}`" for i, d in enumerate(dca_plan)])
     
     entry_block = (

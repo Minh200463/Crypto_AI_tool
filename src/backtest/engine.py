@@ -93,11 +93,8 @@ class BacktestEngine:
                     
                     is_tier_b = best_score < 8
                     levels = self.ta_svc.calculate_trade_levels(side, ind.current_price, ind, is_tier_b=is_tier_b)
-                    entry = levels.get("limit_entry") or levels.get("entry") or ind.current_price
-                    sl = levels['sl']
-                    tp1 = levels['tp1']
                     
-                    outcome = self._simulate_trade(df_4h, i+1, side, entry, sl, tp1)
+                    outcome = self._simulate_trade(df_4h, i+1, side, levels, is_tier_b)
                     
                     if outcome:
                         pnl_pct = outcome['pnl_pct']
@@ -129,33 +126,98 @@ class BacktestEngine:
                 
         self._print_report(trades, initial_equity, equity)
         
-    def _simulate_trade(self, df_4h: pd.DataFrame, start_idx: int, side: str, entry: float, sl: float, tp1: float) -> dict | None:
+    def _simulate_trade(self, df_4h: pd.DataFrame, start_idx: int, side: str, levels: dict, is_tier_b: bool) -> dict | None:
+        import json
+        dca_plan = json.loads(levels.get("dca_plan", "[]"))
+        
+        sl = levels['sl']
+        tp1 = levels['tp1']
+        tp2 = levels.get('tp2')
+        tp3 = levels.get('tp3')
+        
+        # State tracking
+        current_sl = sl
+        dca_hits = []
+        hit_tp1 = False
+        hit_tp2 = False
+        
         # Look ahead up to 42 candles (7 days * 6 4H candles)
         for j in range(start_idx, min(start_idx + 42, len(df_4h))):
             candle = df_4h.iloc[j]
             high = candle['high']
             low = candle['low']
             
+            # Fill DCA
+            for tranche in dca_plan:
+                p = tranche["price"]
+                if tranche not in dca_hits:
+                    if (side == "LONG" and low <= p) or (side == "SHORT" and high >= p):
+                        dca_hits.append(tranche)
+            
+            if not dca_hits:
+                # If price hasn't hit any entry level yet, continue looking
+                # But if price goes to SL/TP1 before any entry is hit, the trade never triggers.
+                # Simplified: if it hits SL before entry, trade is invalidated.
+                if (side == "LONG" and low <= current_sl) or (side == "SHORT" and high >= current_sl):
+                    return None # Never entered
+                continue
+                
+            # Calculate current weighted entry
+            weighted_entry = sum(t["price"] * (t["weight"]/100) for t in dca_hits) / sum(t["weight"]/100 for t in dca_hits)
+            
             if side == "LONG":
-                if low <= sl:
-                    return {'type': 'SL', 'pnl_pct': (sl - entry) / entry * 100}
-                if high >= tp1:
-                    return {'type': 'TP1', 'pnl_pct': (tp1 - entry) / entry * 100}
+                if low <= current_sl:
+                    if hit_tp1:
+                        # Stopped out at breakeven after TP1
+                        return {'type': 'Partial Win (BE)', 'pnl_pct': (current_sl - weighted_entry) / weighted_entry * 100}
+                    return {'type': 'SL', 'pnl_pct': (current_sl - weighted_entry) / weighted_entry * 100}
+                    
+                if high >= tp1 and not hit_tp1:
+                    if is_tier_b or not tp2:
+                        return {'type': 'TP1', 'pnl_pct': (tp1 - weighted_entry) / weighted_entry * 100}
+                    # Hit TP1, move SL to breakeven
+                    hit_tp1 = True
+                    current_sl = weighted_entry
+                
+                if hit_tp1 and tp2 and high >= tp2 and not hit_tp2:
+                    if not tp3:
+                        return {'type': 'TP2', 'pnl_pct': (tp2 - weighted_entry) / weighted_entry * 100}
+                    hit_tp2 = True
+                    
+                if hit_tp2 and tp3 and high >= tp3:
+                    return {'type': 'TP3', 'pnl_pct': (tp3 - weighted_entry) / weighted_entry * 100}
             else:
-                if high >= sl:
-                    return {'type': 'SL', 'pnl_pct': (entry - sl) / entry * 100}
-                if low <= tp1:
-                    return {'type': 'TP1', 'pnl_pct': (entry - tp1) / entry * 100}
+                if high >= current_sl:
+                    if hit_tp1:
+                        return {'type': 'Partial Win (BE)', 'pnl_pct': (weighted_entry - current_sl) / weighted_entry * 100}
+                    return {'type': 'SL', 'pnl_pct': (weighted_entry - current_sl) / weighted_entry * 100}
+                    
+                if low <= tp1 and not hit_tp1:
+                    if is_tier_b or not tp2:
+                        return {'type': 'TP1', 'pnl_pct': (weighted_entry - tp1) / weighted_entry * 100}
+                    hit_tp1 = True
+                    current_sl = weighted_entry
+                    
+                if hit_tp1 and tp2 and low <= tp2 and not hit_tp2:
+                    if not tp3:
+                        return {'type': 'TP2', 'pnl_pct': (weighted_entry - tp2) / weighted_entry * 100}
+                    hit_tp2 = True
+                    
+                if hit_tp2 and tp3 and low <= tp3:
+                    return {'type': 'TP3', 'pnl_pct': (weighted_entry - tp3) / weighted_entry * 100}
         
         # Expired
-        if start_idx + 42 < len(df_4h):
-            close = df_4h.iloc[start_idx + 41]['close']
-            pnl_pct = (close - entry) / entry * 100 if side == "LONG" else (entry - close) / entry * 100
-            return {'type': 'EXPIRED', 'pnl_pct': pnl_pct}
+        if not dca_hits:
+            return None
             
-        return None
+        weighted_entry = sum(t["price"] * (t["weight"]/100) for t in dca_hits) / sum(t["weight"]/100 for t in dca_hits)
+        close_price = df_4h.iloc[start_idx + 41]['close']
+        pnl_pct = (close_price - weighted_entry) / weighted_entry * 100 if side == "LONG" else (weighted_entry - close_price) / weighted_entry * 100
+        return {'type': 'EXPIRED', 'pnl_pct': pnl_pct}
         
     def _print_report(self, trades: list, initial_equity: float, final_equity: float):
+        logger.warning("⚠️ Backtest này KHÔNG bao gồm order book/funding — chỉ test phần dựa trên OHLCV (MTF, scoring, structural SL/TP, DCA).")
+        
         if not trades:
             logger.info("No trades executed.")
             return

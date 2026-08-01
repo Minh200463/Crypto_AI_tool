@@ -13,7 +13,7 @@ async def analyze_order_book_depth(binance_client, symbol: str, current_price: f
         depth = await binance_client.get_order_book(symbol=symbol, limit=500)
     except Exception as e:
         logger.warning("Could not fetch order book for %s: %s", symbol, e)
-        return {"bid_ask_imbalance": 0.5, "liquidity_walls": [], "estimated_slippage_pct": 0.0}
+        return {"bid_ask_imbalance": 0.5, "liquidity_walls": [], "raw_bids": [], "raw_asks": []}
 
     bids = [(float(p), float(q)) for p, q in depth.get("bids", [])]
     asks = [(float(p), float(q)) for p, q in depth.get("asks", [])]
@@ -37,8 +37,46 @@ async def analyze_order_book_depth(binance_client, symbol: str, current_price: f
     return {
         "bid_ask_imbalance": round(imbalance, 3),  # >0.6 = áp lực mua chiếm ưu thế gần giá
         "liquidity_walls": bid_walls + ask_walls,
-        "estimated_slippage_pct": 0.0 # Placeholder for slipage logic if needed
+        "raw_bids": bids,
+        "raw_asks": asks
     }
+
+def calculate_slippage(depth_data: dict, position_usdt: float, side: str, current_price: float) -> float:
+    """
+    Tính ước lượng slippage (%) khi khớp lệnh market dựa vào Order Book.
+    """
+    if not position_usdt or position_usdt <= 0:
+        return 0.0
+        
+    orders = depth_data.get("raw_asks", []) if side.lower() == "long" else depth_data.get("raw_bids", [])
+    if not orders:
+        return 0.0
+        
+    remaining_usdt = position_usdt
+    total_cost_usdt = 0.0
+    total_qty = 0.0
+    
+    for p, q in orders:
+        level_usdt = p * q
+        if remaining_usdt <= level_usdt:
+            # Khớp hết phần còn lại ở mức giá này
+            qty = remaining_usdt / p
+            total_qty += qty
+            total_cost_usdt += remaining_usdt
+            remaining_usdt = 0
+            break
+        else:
+            # Khớp toàn bộ mức giá này và đi tiếp
+            total_qty += q
+            total_cost_usdt += level_usdt
+            remaining_usdt -= level_usdt
+            
+    if total_qty == 0:
+        return 0.0
+        
+    avg_price = total_cost_usdt / total_qty
+    slippage_pct = abs(avg_price - current_price) / current_price * 100.0
+    return round(slippage_pct, 4)
 
 def compute_volume_profile(klines: list[list], num_bins: int = 50) -> dict[str, Any]:
     """
@@ -118,7 +156,7 @@ def cluster_equal_levels(levels: list[float], tolerance_pct: float) -> list[floa
         pools.append(sum(current_pool)/len(current_pool))
     return [float(p) for p in pools]
 
-def detect_liquidity_pools(klines: list[list], lookback: int = 100, tolerance_pct: float = 0.15) -> dict[str, list[float]]:
+def detect_liquidity_pools(klines: list[list], lookback: int = 100, k: float = 0.3) -> dict[str, list[float]]:
     """
     Tìm các vùng equal highs/lows - nơi nhiều trader đặt SL cùng 1 chỗ.
     """
@@ -128,8 +166,22 @@ def detect_liquidity_pools(klines: list[list], lookback: int = 100, tolerance_pc
         return {"resistance_pools": [], "support_pools": []}
         
     recent_klines = klines[-lookback:]
-    highs = [float(k[2]) for k in recent_klines]
-    lows = [float(k[3]) for k in recent_klines]
+    highs = [float(candle[2]) for candle in recent_klines]
+    lows = [float(candle[3]) for candle in recent_klines]
+    
+    # Calculate ATR proxy for tolerance
+    import pandas as pd
+    df = pd.DataFrame(recent_klines, columns=["open_time", "open", "high", "low", "close", "volume", "close_time", "quote_volume", "count", "taker_buy_vol", "taker_buy_quote", "ignore"])
+    for col in ["high", "low", "close"]:
+        df[col] = df[col].astype(float)
+    df["tr0"] = abs(df["high"] - df["low"])
+    df["tr1"] = abs(df["high"] - df["close"].shift())
+    df["tr2"] = abs(df["low"] - df["close"].shift())
+    tr = df[["tr0", "tr1", "tr2"]].max(axis=1)
+    atr = tr.rolling(14).mean().iloc[-1]
+    current_price = float(df["close"].iloc[-1])
+    atr_pct = (atr / current_price) * 100 if current_price > 0 else 0.15
+    tolerance_pct = k * atr_pct
 
     pools_high = cluster_equal_levels(highs, tolerance_pct)
     pools_low = cluster_equal_levels(lows, tolerance_pct)

@@ -513,19 +513,27 @@ class TAService:
             if float(c_prev["high"]) < float(c_next["low"]):
                 fvg_bottom = float(c_prev["high"])
                 fvg_top    = float(c_next["low"])
-                # Filter filled: price has dipped into or below the gap
-                if current_low <= fvg_bottom:
-                    continue  # already filled — skip
-                fvgs.append({"type": "bullish", "top": fvg_top, "bottom": fvg_bottom})
+                # Filter filled: check if any candle after c_curr has dipped into or below the gap
+                is_filled = False
+                for j in range(idx + 1, 0):
+                    if float(df["low"].iloc[j]) <= fvg_bottom:
+                        is_filled = True
+                        break
+                if not is_filled:
+                    fvgs.append({"type": "bullish", "top": fvg_top, "bottom": fvg_bottom})
 
             # Bearish FVG: gap between c_next.high and c_prev.low
             elif float(c_prev["low"]) > float(c_next["high"]):
                 fvg_top    = float(c_prev["low"])
                 fvg_bottom = float(c_next["high"])
-                # Filter filled: price has risen into or above the gap
-                if current_high >= fvg_top:
-                    continue  # already filled — skip
-                fvgs.append({"type": "bearish", "top": fvg_top, "bottom": fvg_bottom})
+                # Filter filled: check if any candle after c_curr has risen into or above the gap
+                is_filled = False
+                for j in range(idx + 1, 0):
+                    if float(df["high"].iloc[j]) >= fvg_top:
+                        is_filled = True
+                        break
+                if not is_filled:
+                    fvgs.append({"type": "bearish", "top": fvg_top, "bottom": fvg_bottom})
 
         return fvgs[:3]  # 3 most recent unfilled FVGs
 
@@ -762,10 +770,7 @@ class TAService:
             for w in l_ctx.get("warnings", []):
                 reasons.append(w)
             
-            # Bonus from liquidity score
-            if l_ctx.get("score", 5.0) >= 6.0:
-                score += 1
-                reasons.append("Thanh khoản ủng hộ (Order Book & Funding tốt) 🌊")
+            # Bonus từ Liquidity Score (Phase 7: bỏ cộng điểm từ order book theo feedback của trader)
             
             # LVN check (Entry rơi vào vùng kém thanh khoản)
             vp = l_ctx.get("volume_profile", {})
@@ -834,6 +839,7 @@ class TAService:
         _session = self.get_current_session()
         if not _session["high_liquidity"]:
             score = max(0, score - 1)
+            breakdown["session_penalty"] = breakdown.get("session_penalty", 0) - 1
             reasons.append(
                 f"⚠️ {_session['emoji']} {_session['label']}: Low-liquidity session — score -1"
             )
@@ -844,7 +850,6 @@ class TAService:
         if ind.bos_signal == "bullish":
             score += 1
             reasons.append("📈 BOS xác nhận — phá vỡ swing high cấu trúc, trend mới hình thành 🎯")
-
         return score, reasons, breakdown
 
     def score_short_setup(
@@ -973,11 +978,6 @@ class TAService:
             for w in l_ctx.get("warnings", []):
                 reasons.append(w)
             
-            # Bonus from liquidity score
-            if l_ctx.get("score", 5.0) >= 6.0:
-                score += 1
-                reasons.append("Thanh khoản ủng hộ (Order Book & Funding tốt) 🌊")
-
             # LVN check
             vp = l_ctx.get("volume_profile", {})
             lvn_zones = vp.get("lvn_zones", [])
@@ -1039,6 +1039,7 @@ class TAService:
         _session = self.get_current_session()
         if not _session["high_liquidity"]:
             score = max(0, score - 1)
+            breakdown["session_penalty"] = breakdown.get("session_penalty", 0) - 1
             reasons.append(
                 f"⚠️ {_session['emoji']} {_session['label']}: Low-liquidity session — score -1"
             )
