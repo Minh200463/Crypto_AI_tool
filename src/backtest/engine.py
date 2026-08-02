@@ -72,58 +72,50 @@ class BacktestEngine:
             chunk_1w = [row for row in raw_1w if row[0] <= current_time][-52:]
             
             if not chunk_1d or not chunk_1w:
-                logger.error(f"Error: {e}")
                 continue
                 
-            try:
-                ind = self.ta_svc.compute_indicators(symbol, "4h", chunk_4h)
-                daily_trend = self.ta_svc.get_daily_trend(chunk_1d)
-                weekly_trend = self.ta_svc.get_weekly_trend(chunk_1w)
+            ind = self.ta_svc.compute_indicators(symbol, "4h", chunk_4h)
+            
+            # We need a dummy structure since we don't have order book in backtest
+            ind.liquidity_context = {
+                "depth": {"bid_ask_imbalance": 0.5, "liquidity_walls": []},
+                "volume_profile": {"poc": 0, "hvn_zones": [], "lvn_zones": []},
+                "funding_oi": {"funding_rate": 0, "oi_change_24h": 0, "regime": "NEUTRAL"}
+            }
+            
+            long_score, long_reasons, long_brk = self.ta_svc.score_long_setup(ind)
+            short_score, short_reasons, short_brk = self.ta_svc.score_short_setup(ind)
+            
+            best_score = max(long_score, short_score)
+            
+            # Simple condition for signal
+            if best_score >= 6:
+                side = "LONG" if long_score >= short_score else "SHORT"
                 
-                long_score, long_reasons = self.ta_svc.score_long_setup(ind, daily_trend, weekly_trend)
-                short_score, short_reasons = self.ta_svc.score_short_setup(ind, daily_trend, weekly_trend)
+                is_tier_b = best_score < 8
+                levels = self.ta_svc.calculate_trade_levels(side, ind.current_price, ind, is_tier_b=is_tier_b)
                 
-                best_score = max(long_score, short_score)
+                outcome = self._simulate_trade(df_4h, i+1, side, levels, is_tier_b)
                 
-                if best_score >= 6: # Tier B or A
-                    side = "LONG" if long_score >= short_score else "SHORT"
-                    
-                    # We have a signal. Let's record it and evaluate outcome
-                    # To evaluate outcome, we need to look ahead in df_4h
-                    
-                    is_tier_b = best_score < 8
-                    levels = self.ta_svc.calculate_trade_levels(side, ind.current_price, ind, is_tier_b=is_tier_b)
-                    
-                    outcome = self._simulate_trade(df_4h, i+1, side, levels, is_tier_b)
-                    
-                    if outcome:
-                        pnl_pct = outcome['pnl_pct']
-                        # Position sizing: risk_usd = equity * risk_per_trade_pct
-                        # If SL hit, we lose risk_usd. 
-                        # Trade PNL = (risk_usd / sl_distance_pct) * pnl_pct
-                        sl_dist_pct = abs(entry - sl) / entry * 100
-                        if sl_dist_pct > 0:
-                            trade_pnl = (equity * (risk_per_trade_pct/100) / (sl_dist_pct/100)) * (pnl_pct/100)
-                            equity += trade_pnl
+                if outcome:
+                    pnl_pct = outcome['pnl_pct']
+                    entry_price = outcome.get('entry', levels.get('entry', ind.current_price))
+                    sl = levels['sl']
+                    sl_dist_pct = abs(entry_price - sl) / entry_price * 100
+                    if sl_dist_pct > 0:
+                        trade_pnl = (equity * (risk_per_trade_pct/100) / (sl_dist_pct/100)) * (pnl_pct/100)
+                        equity += trade_pnl
+                        
+                        trades.append({
+                            'time': pd.to_datetime(current_time, unit='ms'),
+                            'side': side,
+                            'score': best_score,
+                            'regime': ind.market_regime,
+                            'outcome': outcome['type'],
+                            'pnl_pct': pnl_pct,
+                            'equity': equity
+                        })
                             
-                            trades.append({
-                                'time': pd.to_datetime(current_time, unit='ms'),
-                                'side': side,
-                                'score': best_score,
-                                'regime': ind.market_regime,
-                                'outcome': outcome['type'],
-                                'pnl_pct': pnl_pct,
-                                'equity': equity
-                            })
-                            
-                            # Skip ahead a few candles if we entered a trade to avoid overlapping signals
-                            # Not skipping for now, let's just log them all (might overlap)
-                            
-            except Exception as e:
-                # Some candles might cause math errors
-                logger.error(f"Error: {e}")
-                continue
-                
         self._print_report(trades, initial_equity, equity)
         
     def _simulate_trade(self, df_4h: pd.DataFrame, start_idx: int, side: str, levels: dict, is_tier_b: bool) -> dict | None:
@@ -169,42 +161,42 @@ class BacktestEngine:
                 if low <= current_sl:
                     if hit_tp1:
                         # Stopped out at breakeven after TP1
-                        return {'type': 'Partial Win (BE)', 'pnl_pct': (current_sl - weighted_entry) / weighted_entry * 100}
-                    return {'type': 'SL', 'pnl_pct': (current_sl - weighted_entry) / weighted_entry * 100}
+                        return {'type': 'Partial Win (BE)', 'pnl_pct': (current_sl - weighted_entry) / weighted_entry * 100, 'entry': weighted_entry}
+                    return {'type': 'SL', 'pnl_pct': (current_sl - weighted_entry) / weighted_entry * 100, 'entry': weighted_entry}
                     
                 if high >= tp1 and not hit_tp1:
                     if is_tier_b or not tp2:
-                        return {'type': 'TP1', 'pnl_pct': (tp1 - weighted_entry) / weighted_entry * 100}
+                        return {'type': 'TP1', 'pnl_pct': (tp1 - weighted_entry) / weighted_entry * 100, 'entry': weighted_entry}
                     # Hit TP1, move SL to breakeven
                     hit_tp1 = True
                     current_sl = weighted_entry
                 
                 if hit_tp1 and tp2 and high >= tp2 and not hit_tp2:
                     if not tp3:
-                        return {'type': 'TP2', 'pnl_pct': (tp2 - weighted_entry) / weighted_entry * 100}
+                        return {'type': 'TP2', 'pnl_pct': (tp2 - weighted_entry) / weighted_entry * 100, 'entry': weighted_entry}
                     hit_tp2 = True
                     
                 if hit_tp2 and tp3 and high >= tp3:
-                    return {'type': 'TP3', 'pnl_pct': (tp3 - weighted_entry) / weighted_entry * 100}
+                    return {'type': 'TP3', 'pnl_pct': (tp3 - weighted_entry) / weighted_entry * 100, 'entry': weighted_entry}
             else:
                 if high >= current_sl:
                     if hit_tp1:
-                        return {'type': 'Partial Win (BE)', 'pnl_pct': (weighted_entry - current_sl) / weighted_entry * 100}
-                    return {'type': 'SL', 'pnl_pct': (weighted_entry - current_sl) / weighted_entry * 100}
+                        return {'type': 'Partial Win (BE)', 'pnl_pct': (weighted_entry - current_sl) / weighted_entry * 100, 'entry': weighted_entry}
+                    return {'type': 'SL', 'pnl_pct': (weighted_entry - current_sl) / weighted_entry * 100, 'entry': weighted_entry}
                     
                 if low <= tp1 and not hit_tp1:
                     if is_tier_b or not tp2:
-                        return {'type': 'TP1', 'pnl_pct': (weighted_entry - tp1) / weighted_entry * 100}
+                        return {'type': 'TP1', 'pnl_pct': (weighted_entry - tp1) / weighted_entry * 100, 'entry': weighted_entry}
                     hit_tp1 = True
                     current_sl = weighted_entry
                     
                 if hit_tp1 and tp2 and low <= tp2 and not hit_tp2:
                     if not tp3:
-                        return {'type': 'TP2', 'pnl_pct': (weighted_entry - tp2) / weighted_entry * 100}
+                        return {'type': 'TP2', 'pnl_pct': (weighted_entry - tp2) / weighted_entry * 100, 'entry': weighted_entry}
                     hit_tp2 = True
                     
                 if hit_tp2 and tp3 and low <= tp3:
-                    return {'type': 'TP3', 'pnl_pct': (weighted_entry - tp3) / weighted_entry * 100}
+                    return {'type': 'TP3', 'pnl_pct': (weighted_entry - tp3) / weighted_entry * 100, 'entry': weighted_entry}
         
         # Expired
         if not dca_hits:
@@ -213,7 +205,7 @@ class BacktestEngine:
         weighted_entry = sum(t["price"] * (t["weight"]/100) for t in dca_hits) / sum(t["weight"]/100 for t in dca_hits)
         close_price = df_4h.iloc[start_idx + 41]['close']
         pnl_pct = (close_price - weighted_entry) / weighted_entry * 100 if side == "LONG" else (weighted_entry - close_price) / weighted_entry * 100
-        return {'type': 'EXPIRED', 'pnl_pct': pnl_pct}
+        return {'type': 'EXPIRED', 'pnl_pct': pnl_pct, 'entry': weighted_entry}
         
     def _print_report(self, trades: list, initial_equity: float, final_equity: float):
         logger.warning("⚠️ Backtest này KHÔNG bao gồm order book/funding — chỉ test phần dựa trên OHLCV (MTF, scoring, structural SL/TP, DCA).")

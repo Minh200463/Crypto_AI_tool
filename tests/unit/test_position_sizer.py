@@ -33,8 +33,7 @@ def test_calculate_position_size_capped():
 def test_calculate_position_size_zero_sl():
     ps = calculate_position_size(equity=10000, risk_pct=1.0, entry_price=50000, sl_pct=0.0, tier="A")
     # fallback to 2.0%
-    assert ps.sl_pct == 0.0 # wait, function uses 2.0 but doesn't return it modified in ps.sl_pct? 
-    # Let's check function: it returns the original sl_pct in the struct, wait. 
+    assert ps.sl_pct == 2.0 
     # risk_amount_usdt = equity * effective_risk_pct / 100.0 = 100
     # position_usdt = 100 / (2.0/100) = 5000
     assert ps.position_usdt == 5000.0

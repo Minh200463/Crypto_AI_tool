@@ -136,7 +136,7 @@ async def generate_full_signal(
     
     from src.services.liquidity_service import calculate_slippage
     depth_data = ind.liquidity_context.get("depth", {}) if ind.liquidity_context else {}
-    slippage_pct = calculate_slippage(depth_data, ps.position_size_usd, side, ind.current_price)
+    slippage_pct = calculate_slippage(depth_data, ps.position_usdt, side, ind.current_price)
     
     if slippage_pct > 0.5:
         slip_warning = f"\n   ⚠️ *Cảnh báo trượt giá:* Ước tính trượt ~{slippage_pct}% (Volume quá lớn so với Order Book)"
