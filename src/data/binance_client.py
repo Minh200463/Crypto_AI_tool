@@ -1,6 +1,9 @@
 """
 Binance API Client — fetches market data (no API key needed for public endpoints).
+Uses data-api.binance.vision (market-data dedicated endpoint — higher rate limits,
+recommended by Binance for read-only apps).
 Uses httpx async + tenacity retry + cache-aside pattern.
+Circuit-breaker: on 418/429 serves stale cache instead of raising immediately.
 """
 import logging
 from typing import Any
@@ -9,7 +12,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 logger = logging.getLogger(__name__)
 
-BINANCE_BASE_URL = "https://api.binance.com"
+# BINANCE_BASE_URL = "https://api.binance.com"
+BINANCE_BASE_URL = "https://data-api.binance.vision"
 BINANCE_TESTNET_URL = "https://testnet.binance.vision"
 BINANCE_FUTURES_URL = "https://fapi.binance.com"
 
@@ -55,6 +59,12 @@ class BinanceClient:
     async def _get(self, path: str, params: dict | None = None, use_futures: bool = False) -> Any:
         url = f"{BINANCE_FUTURES_URL}{path}" if use_futures else path
         resp = await self._http.get(url, params=params)
+        if resp.status_code in (418, 429):
+            # Binance is rate-limiting us — let callers handle via cache fallback
+            logger.warning(
+                "Binance rate-limit %s on %s — callers will fall back to cache",
+                resp.status_code, path,
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -98,6 +108,14 @@ class BinanceClient:
                 raise httpx.HTTPStatusError("skip spot", request=None, response=None)  # type: ignore
             data = await self._get("/api/v3/ticker/24hr", {"symbol": symbol})
         except httpx.HTTPStatusError as e:
+            # --- Circuit breaker: serve stale cache on rate-limit ---
+            if e.response is not None and e.response.status_code in (418, 429):
+                logger.warning("Binance rate-limited (ticker:%s) — serving stale cache if available", symbol)
+                if self._cache:
+                    stale = await self._cache.get(cache_key)
+                    if stale:
+                        return stale
+                raise
             if use_futures_direct or e.response is None or e.response.status_code == 400:
                 logger.info("Symbol %s is Futures-only — fetching ticker from fapi", symbol)
                 data = await self._get("/fapi/v1/ticker/24hr", {"symbol": symbol}, use_futures=True)
@@ -150,6 +168,17 @@ class BinanceClient:
                 {"symbol": symbol, "interval": interval, "limit": limit},
             )
         except httpx.HTTPStatusError as e:
+            # --- Circuit breaker: serve stale cache on rate-limit ---
+            if e.response is not None and e.response.status_code in (418, 429):
+                logger.warning(
+                    "Binance rate-limited (klines:%s:%s) — serving stale cache if available",
+                    symbol, interval,
+                )
+                if self._cache:
+                    stale = await self._cache.get(cache_key)
+                    if stale:
+                        return stale
+                raise
             if use_futures_direct or e.response is None or e.response.status_code == 400:
                 logger.info("Symbol %s is Futures-only — fetching klines from fapi (%s, limit=%s)", symbol, interval, limit)
                 data = await self._get(
