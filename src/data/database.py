@@ -22,6 +22,13 @@ _pool_class = None
 if "sqlite" in settings.DATABASE_URL:
     _connect_args = {"check_same_thread": False}
     _pool_class = StaticPool
+elif "postgresql" in settings.DATABASE_URL:
+    # Managed Postgres providers (Supabase, Neon, ...) put a transaction-mode
+    # PgBouncer in front of the "pooler" endpoint, which doesn't support
+    # server-side prepared statements. asyncpg uses them by default, so it
+    # must be told not to cache/prepare statements or every query after the
+    # first raises DuplicatePreparedStatementError.
+    _connect_args = {"statement_cache_size": 0}
 
 engine = create_async_engine(
     settings.DATABASE_URL,
