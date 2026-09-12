@@ -30,7 +30,15 @@ async def main() -> None:
 
     # 1. Init database
     from src.data.database import create_all_tables, AsyncSessionLocal
-    await create_all_tables()
+    try:
+        await create_all_tables()
+    except Exception:
+        logger.error(
+            "Database init failed — continuing in degraded mode (bot/scheduler "
+            "will run, but DB-backed features like journal/watchlist will error "
+            "until the DB is reachable again)",
+            exc_info=True,
+        )
 
     # 2. Init cache
     from src.data.cache import get_cache
