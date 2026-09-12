@@ -72,7 +72,10 @@ def get_conn():
     if USE_POSTGRES:
         import psycopg2
         import psycopg2.extras
-        conn = psycopg2.connect(_SYNC_URL)
+        # Neon (and most managed Postgres) rejects unencrypted connections;
+        # psycopg2 doesn't default to SSL like asyncpg does, so it must be
+        # requested explicitly here.
+        conn = psycopg2.connect(_SYNC_URL, sslmode="require")
         conn.autocommit = True
         conn.cursor_factory = psycopg2.extras.RealDictCursor  # row["col"] syntax
         
