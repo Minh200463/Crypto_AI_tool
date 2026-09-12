@@ -512,11 +512,15 @@ def setup_scheduler(bot_data: dict) -> AsyncIOScheduler:
     """Configure and return the scheduler with all jobs."""
     scheduler = get_scheduler()
 
-    # Every 5 minutes — price alert check
+    # Every 15 minutes — price alert check
+    # (was 5 min — Neon free-tier compute only auto-suspends after a stretch
+    # of no connections, so polling every 5 min kept it awake around the
+    # clock and burned through the monthly compute quota. 15 min gives it
+    # room to suspend between runs while still catching alerts promptly.)
     scheduler.add_job(
         job_check_price_alerts,
         trigger="interval",
-        minutes=5,
+        minutes=15,
         kwargs={"bot_data": bot_data},
         id="check_price_alerts",
         replace_existing=True,
@@ -524,11 +528,11 @@ def setup_scheduler(bot_data: dict) -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # Every 30 minutes — RSI extreme check
+    # Every 60 minutes — RSI extreme check (was 30 min, same reason as above)
     scheduler.add_job(
         job_check_rsi_alerts,
         trigger="interval",
-        minutes=30,
+        minutes=60,
         kwargs={"bot_data": bot_data},
         id="check_rsi_alerts",
         replace_existing=True,
