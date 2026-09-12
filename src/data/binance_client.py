@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 BINANCE_BASE_URL = "https://data-api.binance.vision"
 BINANCE_TESTNET_URL = "https://testnet.binance.vision"
 BINANCE_FUTURES_URL = "https://fapi.binance.com"
+BYBIT_BASE_URL = "https://api.bybit.com"
+
+# Binance interval string -> Bybit interval string
+_BYBIT_INTERVAL_MAP = {
+    "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+    "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
+    "1d": "D", "1w": "W", "1M": "M",
+}
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -168,7 +176,7 @@ class BinanceClient:
                 {"symbol": symbol, "interval": interval, "limit": limit},
             )
         except httpx.HTTPStatusError as e:
-            # --- Circuit breaker: serve stale cache on rate-limit ---
+            # --- Circuit breaker: on rate-limit, try stale cache, then Bybit fallback ---
             if e.response is not None and e.response.status_code in (418, 429):
                 logger.warning(
                     "Binance rate-limited (klines:%s:%s) — serving stale cache if available",
@@ -178,7 +186,13 @@ class BinanceClient:
                     stale = await self._cache.get(cache_key)
                     if stale:
                         return stale
-                raise
+                logger.warning(
+                    "No cache for klines:%s:%s — falling back to Bybit", symbol, interval,
+                )
+                data = await self._get_klines_bybit(symbol, interval, limit)
+                if self._cache:
+                    await self._cache.set(cache_key, data, ttl_seconds=300)
+                return data
             if use_futures_direct or e.response is None or e.response.status_code == 400:
                 logger.info("Symbol %s is Futures-only — fetching klines from fapi (%s, limit=%s)", symbol, interval, limit)
                 data = await self._get(
@@ -194,6 +208,51 @@ class BinanceClient:
             await self._cache.set(cache_key, data, ttl_seconds=300)
 
         return data
+
+    async def _get_klines_bybit(
+        self, symbol: str, interval: str, limit: int,
+    ) -> list[list]:
+        """
+        Fallback klines source when Binance is rate-limiting this IP and no
+        cache is available. Bybit has a separate rate-limit pool and needs
+        no API key for public market data.
+        Re-shapes Bybit's response into Binance's 12-column kline format so
+        callers (ta_service._parse_candles) don't need any changes.
+        """
+        bybit_interval = _BYBIT_INTERVAL_MAP.get(interval)
+        if bybit_interval is None:
+            raise ValueError(f"Unsupported interval for Bybit fallback: {interval}")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{BYBIT_BASE_URL}/v5/market/kline",
+                params={
+                    "category": "linear",
+                    "symbol": symbol,
+                    "interval": bybit_interval,
+                    "limit": limit,
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+
+        if payload.get("retCode") != 0:
+            raise RuntimeError(f"Bybit klines error: {payload.get('retMsg')}")
+
+        rows = payload["result"]["list"]
+        # Bybit returns [start, open, high, low, close, volume, turnover], newest first.
+        rows = list(reversed(rows))
+
+        candles = []
+        for r in rows:
+            start, o, h, l, c, vol, turnover = r[:7]
+            candles.append([
+                int(start), o, h, l, c, vol,
+                int(start),      # close_time (approximation, unused downstream)
+                turnover,        # quote_volume
+                0, "0", "0", "0",  # trades, taker_buy_base, taker_buy_quote, ignore
+            ])
+        return candles
 
     async def get_order_book(self, symbol: str, limit: int = 500) -> dict:
         """
