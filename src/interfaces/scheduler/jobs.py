@@ -290,12 +290,18 @@ async def job_auto_scan_watchlist(bot_data: dict) -> None:
     binance = bot_data.get("binance")
     bot     = bot_data.get("bot_instance")
     if not binance or not bot:
+        logger.warning(
+            "Auto-scan skipped — bot_data missing 'binance' or 'bot_instance' "
+            "(binance=%s, bot_instance=%s)",
+            binance is not None, bot is not None,
+        )
         return
 
     # Get all users who enabled autoscan
     autoscan_users = get_all_autoscan_users()
     if not autoscan_users:
-        return  # Nobody has autoscan on — skip entirely
+        logger.info("Auto-scan: no users have it enabled — skipping")
+        return
 
     logger.info("Auto-scan: checking %d users", len(autoscan_users))
     ta_svc = TAService()
