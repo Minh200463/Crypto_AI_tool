@@ -368,8 +368,8 @@ async def job_auto_scan_watchlist(bot_data: dict) -> None:
                         daily_trend  = ta_svc.get_daily_trend(candles_1d) if not isinstance(candles_1d, Exception) else "UNKNOWN"
                         weekly_trend = ta_svc.get_weekly_trend(candles_1w) if not isinstance(candles_1w, Exception) else "UNKNOWN"
 
-                        long_score,  long_reasons  = ta_svc.score_long_setup(ind, daily_trend, weekly_trend)
-                        short_score, short_reasons = ta_svc.score_short_setup(ind, daily_trend, weekly_trend)
+                        long_score,  long_reasons,  _  = ta_svc.score_long_setup(ind, daily_trend, weekly_trend)
+                        short_score, short_reasons, _  = ta_svc.score_short_setup(ind, daily_trend, weekly_trend)
 
                         best_score = max(long_score, short_score)
                         if best_score < min_score:
